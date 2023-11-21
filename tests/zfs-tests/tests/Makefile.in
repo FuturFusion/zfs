@@ -151,6 +151,7 @@ am__aclocal_m4_deps = $(top_srcdir)/config/always-arch.m4 \
 	$(top_srcdir)/config/kernel-follow-down-one.m4 \
 	$(top_srcdir)/config/kernel-fpu.m4 \
 	$(top_srcdir)/config/kernel-fst-mount.m4 \
+	$(top_srcdir)/config/kernel-fsync-bdev.m4 \
 	$(top_srcdir)/config/kernel-fsync.m4 \
 	$(top_srcdir)/config/kernel-generic_fadvise.m4 \
 	$(top_srcdir)/config/kernel-generic_fillattr.m4 \
@@ -1328,6 +1329,7 @@ am__nobase_dist_datadir_zfs_tests_tests_SCRIPTS_DIST =  \
 	functional/fault/auto_online_001_pos.ksh \
 	functional/fault/auto_online_002_pos.ksh \
 	functional/fault/auto_replace_001_pos.ksh \
+	functional/fault/auto_replace_002_pos.ksh \
 	functional/fault/auto_spare_001_pos.ksh \
 	functional/fault/auto_spare_002_pos.ksh \
 	functional/fault/auto_spare_ashift.ksh \
@@ -1544,8 +1546,15 @@ am__nobase_dist_datadir_zfs_tests_tests_SCRIPTS_DIST =  \
 	functional/raidz/cleanup.ksh \
 	functional/raidz/raidz_001_neg.ksh \
 	functional/raidz/raidz_002_pos.ksh \
-	functional/raidz/raidz_003_pos.ksh \
-	functional/raidz/raidz_004_pos.ksh functional/raidz/setup.ksh \
+	functional/raidz/raidz_expand_001_pos.ksh \
+	functional/raidz/raidz_expand_002_pos.ksh \
+	functional/raidz/raidz_expand_003_neg.ksh \
+	functional/raidz/raidz_expand_003_pos.ksh \
+	functional/raidz/raidz_expand_004_pos.ksh \
+	functional/raidz/raidz_expand_005_pos.ksh \
+	functional/raidz/raidz_expand_006_neg.ksh \
+	functional/raidz/raidz_expand_007_neg.ksh \
+	functional/raidz/setup.ksh \
 	functional/redacted_send/cleanup.ksh \
 	functional/redacted_send/redacted_compressed.ksh \
 	functional/redacted_send/redacted_contents.ksh \
@@ -3681,6 +3690,7 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS =  \
 	functional/fault/auto_online_001_pos.ksh \
 	functional/fault/auto_online_002_pos.ksh \
 	functional/fault/auto_replace_001_pos.ksh \
+	functional/fault/auto_replace_002_pos.ksh \
 	functional/fault/auto_spare_001_pos.ksh \
 	functional/fault/auto_spare_002_pos.ksh \
 	functional/fault/auto_spare_ashift.ksh \
@@ -3897,8 +3907,15 @@ nobase_dist_datadir_zfs_tests_tests_SCRIPTS =  \
 	functional/raidz/cleanup.ksh \
 	functional/raidz/raidz_001_neg.ksh \
 	functional/raidz/raidz_002_pos.ksh \
-	functional/raidz/raidz_003_pos.ksh \
-	functional/raidz/raidz_004_pos.ksh functional/raidz/setup.ksh \
+	functional/raidz/raidz_expand_001_pos.ksh \
+	functional/raidz/raidz_expand_002_pos.ksh \
+	functional/raidz/raidz_expand_003_neg.ksh \
+	functional/raidz/raidz_expand_003_pos.ksh \
+	functional/raidz/raidz_expand_004_pos.ksh \
+	functional/raidz/raidz_expand_005_pos.ksh \
+	functional/raidz/raidz_expand_006_neg.ksh \
+	functional/raidz/raidz_expand_007_neg.ksh \
+	functional/raidz/setup.ksh \
 	functional/redacted_send/cleanup.ksh \
 	functional/redacted_send/redacted_compressed.ksh \
 	functional/redacted_send/redacted_contents.ksh \

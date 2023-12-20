@@ -1,0 +1,239 @@
+From 9b17d5a37d6c64e4af509ac8be1968b09886871a Mon Sep 17 00:00:00 2001
+From: David Hedberg <david@qzx.se>
+Date: Mon, 23 Jan 2023 22:19:43 +0100
+Subject: [PATCH] Wait for txg sync if the last DRR_FREEOBJECTS might result in
+ a hole
+
+If we receive a DRR_FREEOBJECTS as the first entry in an object range,
+this might end up producing a hole if the freed objects were the
+only existing objects in the block.
+
+If the txg starts syncing before we've processed any following
+DRR_OBJECT records, this leads to a possible race where the backing
+arc_buf_t gets its psize set to 0 in the arc_write_ready() callback
+while still being referenced from a dirty record in the open txg.
+
+To prevent this, we insert a txg_wait_synced call if the first
+record in the range was a DRR_FREEOBJECTS that actually
+resulted in one or more freed objects.
+
+Reviewed-by: Brian Behlendorf <behlendorf1@llnl.gov>
+Signed-off-by: David Hedberg <david.hedberg@findity.com>
+Sponsored by: Findity AB
+Closes #11893
+Closes #14358
+---
+ module/zfs/dmu_recv.c                         | 26 ++++++
+ tests/runfiles/common.run                     |  6 +-
+ tests/runfiles/sanity.run                     |  1 +
+ .../tests/functional/rsend/Makefile.am        |  1 +
+ .../rsend/send_encrypted_freeobjects.ksh      | 87 +++++++++++++++++++
+ 5 files changed, 118 insertions(+), 3 deletions(-)
+ create mode 100755 tests/zfs-tests/tests/functional/rsend/send_encrypted_freeobjects.ksh
+
+diff --git a/module/zfs/dmu_recv.c b/module/zfs/dmu_recv.c
+index 98ca2b3bc..b8161f710 100644
+--- a/module/zfs/dmu_recv.c
++++ b/module/zfs/dmu_recv.c
+@@ -71,6 +71,12 @@ int zfs_recv_write_batch_size = 1024 * 1024;
+ static char *dmu_recv_tag = "dmu_recv_tag";
+ const char *recv_clone_name = "%recv";
+ 
++typedef enum {
++	ORNS_NO,
++	ORNS_YES,
++	ORNS_MAYBE
++} or_need_sync_t;
++
+ static int receive_read_payload_and_next_header(dmu_recv_cookie_t *ra, int len,
+     void *buf);
+ 
+@@ -121,6 +127,9 @@ struct receive_writer_arg {
+ 	uint8_t or_iv[ZIO_DATA_IV_LEN];
+ 	uint8_t or_mac[ZIO_DATA_MAC_LEN];
+ 	boolean_t or_byteorder;
++
++	/* Keep track of DRR_FREEOBJECTS right after DRR_OBJECT_RANGE */
++	or_need_sync_t or_need_sync;
+ };
+ 
+ typedef struct dmu_recv_begin_arg {
+@@ -1658,10 +1667,22 @@ receive_object(struct receive_writer_arg *rwa, struct drr_object *drro,
+ 		/* object was freed and we are about to allocate a new one */
+ 		object_to_hold = DMU_NEW_OBJECT;
+ 	} else {
++		/*
++		 * If the only record in this range so far was DRR_FREEOBJECTS
++		 * with at least one actually freed object, it's possible that
++		 * the block will now be converted to a hole. We need to wait
++		 * for the txg to sync to prevent races.
++		 */
++		if (rwa->or_need_sync == ORNS_YES)
++			txg_wait_synced(dmu_objset_pool(rwa->os), 0);
++
+ 		/* object is free and we are about to allocate a new one */
+ 		object_to_hold = DMU_NEW_OBJECT;
+ 	}
+ 
++	/* Only relevant for the first object in the range */
++	rwa->or_need_sync = ORNS_NO;
++
+ 	/*
+ 	 * If this is a multi-slot dnode there is a chance that this
+ 	 * object will expand into a slot that is already used by
+@@ -1856,6 +1877,9 @@ receive_freeobjects(struct receive_writer_arg *rwa,
+ 
+ 		if (err != 0)
+ 			return (err);
++
++		if (rwa->or_need_sync == ORNS_MAYBE)
++			rwa->or_need_sync = ORNS_YES;
+ 	}
+ 	if (next_err != ESRCH)
+ 		return (next_err);
+@@ -2298,6 +2322,8 @@ receive_object_range(struct receive_writer_arg *rwa,
+ 	bcopy(drror->drr_mac, rwa->or_mac, ZIO_DATA_MAC_LEN);
+ 	rwa->or_byteorder = byteorder;
+ 
++	rwa->or_need_sync = ORNS_MAYBE;
++
+ 	return (0);
+ }
+ 
+diff --git a/tests/runfiles/common.run b/tests/runfiles/common.run
+index 7792e2fb2..502c06494 100644
+--- a/tests/runfiles/common.run
++++ b/tests/runfiles/common.run
+@@ -824,9 +824,9 @@ tests = ['recv_dedup', 'recv_dedup_encrypted_zvol', 'rsend_001_pos',
+     'send-c_mixed_compression', 'send-c_stream_size_estimate',
+     'send-c_embedded_blocks', 'send-c_resume', 'send-cpL_varied_recsize',
+     'send-c_recv_dedup', 'send-L_toggle',
+-    'send_encrypted_incremental.ksh', 'send_encrypted_hierarchy',
+-    'send_encrypted_props', 'send_encrypted_truncated_files',
+-    'send_freeobjects', 'send_realloc_files',
++    'send_encrypted_incremental.ksh', 'send_encrypted_freeobjects',
++    'send_encrypted_hierarchy', 'send_encrypted_props',
++    'send_encrypted_truncated_files', 'send_freeobjects', 'send_realloc_files',
+     'send_realloc_encrypted_files', 'send_spill_block', 'send_holds',
+     'send_hole_birth', 'send_mixed_raw', 'send-wR_encrypted_zvol',
+     'send_partial_dataset', 'send_invalid', 'send_doall',
+diff --git a/tests/runfiles/sanity.run b/tests/runfiles/sanity.run
+index fb39fa54b..0a3d42cb2 100644
+--- a/tests/runfiles/sanity.run
++++ b/tests/runfiles/sanity.run
+@@ -547,6 +547,7 @@ tests = ['recv_dedup', 'recv_dedup_encrypted_zvol', 'rsend_001_pos',
+     'rsend_014_pos', 'rsend_016_neg', 'send-c_verify_contents',
+     'send-c_volume', 'send-c_zstreamdump', 'send-c_recv_dedup',
+     'send-L_toggle', 'send_encrypted_hierarchy', 'send_encrypted_props',
++    'send_encrypted_freeobjects',
+     'send_encrypted_truncated_files', 'send_freeobjects', 'send_holds',
+     'send_mixed_raw', 'send-wR_encrypted_zvol', 'send_partial_dataset',
+     'send_invalid']
+diff --git a/tests/zfs-tests/tests/functional/rsend/Makefile.am b/tests/zfs-tests/tests/functional/rsend/Makefile.am
+index d80d2124e..2cedf03d3 100644
+--- a/tests/zfs-tests/tests/functional/rsend/Makefile.am
++++ b/tests/zfs-tests/tests/functional/rsend/Makefile.am
+@@ -25,6 +25,7 @@ dist_pkgdata_SCRIPTS = \
+ 	rsend_022_pos.ksh \
+ 	rsend_024_pos.ksh \
+ 	send_encrypted_files.ksh \
++	send_encrypted_freeobjects.ksh \
+ 	send_encrypted_hierarchy.ksh \
+ 	send_encrypted_props.ksh \
+ 	send_encrypted_truncated_files.ksh \
+diff --git a/tests/zfs-tests/tests/functional/rsend/send_encrypted_freeobjects.ksh b/tests/zfs-tests/tests/functional/rsend/send_encrypted_freeobjects.ksh
+new file mode 100755
+index 000000000..92451bd1a
+--- /dev/null
++++ b/tests/zfs-tests/tests/functional/rsend/send_encrypted_freeobjects.ksh
+@@ -0,0 +1,87 @@
++#!/bin/ksh
++
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++#
++# Copyright (c) 2017 by Lawrence Livermore National Security, LLC.
++# Copyright (c) 2023 by Findity AB
++#
++
++. $STF_SUITE/tests/functional/rsend/rsend.kshlib
++
++#
++# Description:
++# Verify that receiving a raw encrypted stream, with a FREEOBJECTS
++# removing all existing objects in a block followed by an OBJECT write
++# to the same block, does not result in a panic.
++#
++# Strategy:
++# 1. Create a new encrypted filesystem
++# 2. Create file f1 as the first object in some block (here object 128)
++# 3. Take snapshot A
++# 4. Create file f2 as the second object in the same block (here object 129)
++# 5. Delete f1
++# 6. Take snapshot B
++# 7. Receive a full raw encrypted send of A
++# 8. Receive an incremental raw send of B
++#
++verify_runnable "both"
++
++function create_object_with_num
++{
++	file=$1
++	num=$2
++
++	tries=100
++	for ((i=0; i<$tries; i++)); do
++		touch $file
++		onum=$(ls -li $file | awk '{print $1}')
++
++		if [[ $onum -ne $num ]] ; then
++			rm -f $file
++		else
++			break
++		fi
++	done
++	if [[ $i -eq $tries ]]; then
++		log_fail "Failed to create object with number $num"
++	fi
++}
++
++log_assert "FREEOBJECTS followed by OBJECT in encrypted stream does not crash"
++
++sendds=sendencfods
++recvds=recvencfods
++keyfile=/$POOL/keyencfods
++f1=/$POOL/$sendds/f1
++f2=/$POOL/$sendds/f2
++
++log_must eval "echo 'password' > $keyfile"
++
++#
++# xattr=sa and dnodesize=legacy for sequential object numbers, see
++# note in send_freeobjects.ksh.
++#
++log_must zfs create -o xattr=sa -o dnodesize=legacy -o encryption=on \
++	-o keyformat=passphrase -o keylocation=file://$keyfile $POOL/$sendds
++
++create_object_with_num $f1 128
++log_must zfs snap $POOL/$sendds@A
++create_object_with_num $f2 129
++log_must rm $f1
++log_must zfs snap $POOL/$sendds@B
++
++log_must eval "zfs send -w $POOL/$sendds@A | zfs recv $POOL/$recvds"
++log_must eval "zfs send -w -i $POOL/$sendds@A $POOL/$sendds@B |" \
++	"zfs recv $POOL/$recvds"
++
++log_pass "FREEOBJECTS followed by OBJECT in encrypted stream did not crash"
+-- 
+2.39.2
+

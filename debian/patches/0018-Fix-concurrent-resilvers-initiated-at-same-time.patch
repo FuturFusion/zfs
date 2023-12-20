@@ -1,0 +1,237 @@
+From c2f0aaeb3c4ed20dc614b313b27fa87a0b6c062d Mon Sep 17 00:00:00 2001
+From: Akash B <akash-b@hpe.com>
+Date: Thu, 25 May 2023 00:58:09 +0530
+Subject: [PATCH] Fix concurrent resilvers initiated at same time
+
+For draid vdevs it was possible to initiate both the
+sequential and healing resilver at same time.
+
+This fixes the following two scenarios.
+     1) There's a window where a sequential rebuild can
+be started via ZED even if a healing resilver has been
+scheduled.
+	- This is fixed by adding additional check in
+spa_vdev_attach() for any scheduled resilver and return
+appropriate error code when a resilver is already in
+progress.
+
+     2) It was possible for zpool clear to start a healing
+resilver when it wasn't needed at all. This occurs because
+during a vdev_open() the device is presumed to be healthy not
+until the device is validated by vdev_validate() and it's set
+unavailable. However, by this point an async resilver will
+have already been requested if the DTL isn't empty.
+	- This is fixed by cancelling the SPA_ASYNC_RESILVER
+request immediately at the end of vdev_reopen() when a resilver
+is unneeded.
+
+Finally, added a testcase in ZTS for verification.
+
+Reviewed-by: Brian Behlendorf <behlendorf1@llnl.gov>
+Reviewed-by: Dipak Ghosh <dipak.ghosh@hpe.com>
+Signed-off-by: Akash B <akash-b@hpe.com>
+Closes #14881
+Closes #14892
+---
+ module/zfs/spa.c                              |   5 +-
+ module/zfs/vdev.c                             |  13 ++-
+ tests/runfiles/common.run                     |   3 +-
+ .../cli_root/zpool_resilver/Makefile.am       |   3 +-
+ .../zpool_resilver_concurrent.ksh             | 101 ++++++++++++++++++
+ 5 files changed, 121 insertions(+), 4 deletions(-)
+ create mode 100755 tests/zfs-tests/tests/functional/cli_root/zpool_resilver/zpool_resilver_concurrent.ksh
+
+diff --git a/module/zfs/spa.c b/module/zfs/spa.c
+index 790dd3efb..c511cc453 100644
+--- a/module/zfs/spa.c
++++ b/module/zfs/spa.c
+@@ -33,6 +33,7 @@
+  * Copyright 2017 Joyent, Inc.
+  * Copyright (c) 2017, Intel Corporation.
+  * Copyright (c) 2021, Colm Buckley <colm@tuatha.org>
++ * Copyright (c) 2023 Hewlett Packard Enterprise Development LP.
+  */
+ 
+ /*
+@@ -6757,9 +6758,11 @@ spa_vdev_attach(spa_t *spa, uint64_t guid, nvlist_t *nvroot, int replacing,
+ 		if (!spa_feature_is_enabled(spa, SPA_FEATURE_DEVICE_REBUILD))
+ 			return (spa_vdev_exit(spa, NULL, txg, ENOTSUP));
+ 
+-		if (dsl_scan_resilvering(spa_get_dsl(spa)))
++		if (dsl_scan_resilvering(spa_get_dsl(spa)) ||
++		    dsl_scan_resilver_scheduled(spa_get_dsl(spa))) {
+ 			return (spa_vdev_exit(spa, NULL, txg,
+ 			    ZFS_ERR_RESILVER_IN_PROGRESS));
++		}
+ 	} else {
+ 		if (vdev_rebuild_active(rvd))
+ 			return (spa_vdev_exit(spa, NULL, txg,
+diff --git a/module/zfs/vdev.c b/module/zfs/vdev.c
+index ee0c1d862..b4dbda1d0 100644
+--- a/module/zfs/vdev.c
++++ b/module/zfs/vdev.c
+@@ -28,7 +28,7 @@
+  * Copyright 2017 Joyent, Inc.
+  * Copyright (c) 2017, Intel Corporation.
+  * Copyright (c) 2019, Datto Inc. All rights reserved.
+- * Copyright [2021] Hewlett Packard Enterprise Development LP
++ * Copyright (c) 2021, 2023 Hewlett Packard Enterprise Development LP.
+  */
+ 
+ #include <sys/zfs_context.h>
+@@ -2645,6 +2645,17 @@ vdev_reopen(vdev_t *vd)
+ 		(void) vdev_validate(vd);
+ 	}
+ 
++	/*
++	 * Recheck if resilver is still needed and cancel any
++	 * scheduled resilver if resilver is unneeded.
++	 */
++	if (!vdev_resilver_needed(spa->spa_root_vdev, NULL, NULL) &&
++	    spa->spa_async_tasks & SPA_ASYNC_RESILVER) {
++		mutex_enter(&spa->spa_async_lock);
++		spa->spa_async_tasks &= ~SPA_ASYNC_RESILVER;
++		mutex_exit(&spa->spa_async_lock);
++	}
++
+ 	/*
+ 	 * Reassess parent vdev's health.
+ 	 */
+diff --git a/tests/runfiles/common.run b/tests/runfiles/common.run
+index 502c06494..0623035bd 100644
+--- a/tests/runfiles/common.run
++++ b/tests/runfiles/common.run
+@@ -456,7 +456,8 @@ tests = ['zpool_replace_001_neg', 'replace-o_ashift', 'replace_prop_ashift']
+ tags = ['functional', 'cli_root', 'zpool_replace']
+ 
+ [tests/functional/cli_root/zpool_resilver]
+-tests = ['zpool_resilver_bad_args', 'zpool_resilver_restart']
++tests = ['zpool_resilver_bad_args', 'zpool_resilver_restart',
++    'zpool_resilver_concurrent']
+ tags = ['functional', 'cli_root', 'zpool_resilver']
+ 
+ [tests/functional/cli_root/zpool_scrub]
+diff --git a/tests/zfs-tests/tests/functional/cli_root/zpool_resilver/Makefile.am b/tests/zfs-tests/tests/functional/cli_root/zpool_resilver/Makefile.am
+index 2cec5335f..7ca9e81c1 100644
+--- a/tests/zfs-tests/tests/functional/cli_root/zpool_resilver/Makefile.am
++++ b/tests/zfs-tests/tests/functional/cli_root/zpool_resilver/Makefile.am
+@@ -3,7 +3,8 @@ dist_pkgdata_SCRIPTS = \
+ 	setup.ksh \
+ 	cleanup.ksh \
+ 	zpool_resilver_bad_args.ksh \
+-	zpool_resilver_restart.ksh
++	zpool_resilver_restart.ksh \
++	zpool_resilver_concurrent.ksh
+ 
+ dist_pkgdata_DATA = \
+ 	zpool_resilver.cfg
+diff --git a/tests/zfs-tests/tests/functional/cli_root/zpool_resilver/zpool_resilver_concurrent.ksh b/tests/zfs-tests/tests/functional/cli_root/zpool_resilver/zpool_resilver_concurrent.ksh
+new file mode 100755
+index 000000000..4c3b09796
+--- /dev/null
++++ b/tests/zfs-tests/tests/functional/cli_root/zpool_resilver/zpool_resilver_concurrent.ksh
+@@ -0,0 +1,101 @@
++#!/bin/ksh -p
++#
++# CDDL HEADER START
++#
++# The contents of this file are subject to the terms of the
++# Common Development and Distribution License (the "License").
++# You may not use this file except in compliance with the License.
++#
++# You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
++# or http://www.opensolaris.org/os/licensing.
++# See the License for the specific language governing permissions
++# and limitations under the License.
++#
++# When distributing Covered Code, include this CDDL HEADER in each
++# file and include the License file at usr/src/OPENSOLARIS.LICENSE.
++# If applicable, add the following below this CDDL HEADER, with the
++# fields enclosed by brackets "[]" replaced with your own identifying
++# information: Portions Copyright [yyyy] [name of copyright owner]
++#
++# CDDL HEADER END
++#
++
++#
++# Copyright (c) 2023 Hewlett Packard Enterprise Development LP.
++#
++
++. $STF_SUITE/include/libtest.shlib
++. $STF_SUITE/tests/functional/redundancy/redundancy.kshlib
++
++#
++# DESCRIPTION:
++#	Verify 'zpool clear' doesn't cause concurrent resilvers
++#
++# STRATEGY:
++#	1. Create N(10) virtual disk files.
++#	2. Create draid pool based on the virtual disk files.
++#	3. Fill the filesystem with directories and files.
++#	4. Force-fault 2 vdevs and verify distributed spare is kicked in.
++#	5. Free the distributed spare by replacing the faulty drive.
++#	6. Run zpool clear and verify that it does not initiate 2 resilvers
++#	   concurrently while distributed spare gets kicked in.
++#
++
++verify_runnable "global"
++
++typeset -ir devs=10
++typeset -ir nparity=1
++typeset -ir ndata=8
++typeset -ir dspare=1
++
++function cleanup
++{
++	poolexists "$TESTPOOL" && destroy_pool "$TESTPOOL"
++
++	for i in {0..$devs}; do
++		log_must rm -f "$BASEDIR/vdev$i"
++	done
++
++	for dir in $BASEDIR; do
++		if [[ -d $dir ]]; then
++			log_must rm -rf $dir
++		fi
++	done
++
++	zed_stop
++	zed_cleanup
++}
++
++log_assert "Verify zpool clear on draid pool doesn't cause concurrent resilvers"
++log_onexit cleanup
++
++setup_test_env $TESTPOOL draid${nparity}:${ndata}d:${dspare}s $devs
++
++# ZED needed for sequential resilver
++zed_setup
++log_must zed_start
++
++log_must zpool offline -f $TESTPOOL $BASEDIR/vdev5
++log_must wait_vdev_state  $TESTPOOL draid1-0-0 "ONLINE" 60
++log_must zpool wait -t resilver $TESTPOOL
++log_must zpool offline -f $TESTPOOL $BASEDIR/vdev6
++
++log_must zpool labelclear -f $BASEDIR/vdev5
++log_must zpool labelclear -f $BASEDIR/vdev6
++
++log_must zpool replace -w $TESTPOOL $BASEDIR/vdev5
++sync_pool $TESTPOOL
++
++log_must zpool events -c
++log_must zpool clear $TESTPOOL
++log_must wait_vdev_state  $TESTPOOL draid1-0-0 "ONLINE" 60
++log_must zpool wait -t resilver $TESTPOOL
++log_must zpool wait -t scrub $TESTPOOL
++
++nof_resilver=$(zpool events | grep -c resilver_start)
++if [ $nof_resilver = 1 ] ; then
++	log_must verify_pool $TESTPOOL
++	log_pass "zpool clear on draid pool doesn't cause concurrent resilvers"
++else
++	log_fail "FAIL: sequential and healing resilver initiated concurrently"
++fi
+-- 
+2.39.2
+

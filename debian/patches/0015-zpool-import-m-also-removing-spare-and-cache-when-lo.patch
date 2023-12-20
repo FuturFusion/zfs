@@ -1,0 +1,155 @@
+From 75ec145710e522a94288ee1212eb75b73f495b9f Mon Sep 17 00:00:00 2001
+From: Ameer Hamza <ahamza@ixsystems.com>
+Date: Thu, 4 May 2023 03:10:32 +0500
+Subject: [PATCH] zpool import -m also removing spare and cache when log device
+ is missing
+
+spa_import() relies on a pool config fetched by spa_try_import() for
+spare/cache devices. Import flags are not passed to spa_tryimport(),
+which makes it return early due to a missing log device and missing
+retrieving the cache device and spare eventually. Passing
+ZFS_IMPORT_MISSING_LOG to spa_tryimport() makes it fetch the correct
+configuration regardless of the missing log device.
+
+Reviewed-by: Alexander Motin <mav@FreeBSD.org>
+Reviewed-by: Brian Behlendorf <behlendorf1@llnl.gov>
+Signed-off-by: Ameer Hamza <ahamza@ixsystems.com>
+Closes #14794
+---
+ module/zfs/spa.c                              | 10 +++
+ tests/runfiles/common.run                     |  2 +-
+ .../cli_root/zpool_import/Makefile.am         |  1 +
+ .../zpool_import/import_log_missing.ksh       | 75 +++++++++++++++++++
+ 4 files changed, 87 insertions(+), 1 deletion(-)
+ create mode 100755 tests/zfs-tests/tests/functional/cli_root/zpool_import/import_log_missing.ksh
+
+diff --git a/module/zfs/spa.c b/module/zfs/spa.c
+index 8bc51f777..790dd3efb 100644
+--- a/module/zfs/spa.c
++++ b/module/zfs/spa.c
+@@ -6261,6 +6261,16 @@ spa_tryimport(nvlist_t *tryconfig)
+ 		spa->spa_config_source = SPA_CONFIG_SRC_SCAN;
+ 	}
+ 
++	/*
++	 * spa_import() relies on a pool config fetched by spa_try_import()
++	 * for spare/cache devices. Import flags are not passed to
++	 * spa_tryimport(), which makes it return early due to a missing log
++	 * device and missing retrieving the cache device and spare eventually.
++	 * Passing ZFS_IMPORT_MISSING_LOG to spa_tryimport() makes it fetch
++	 * the correct configuration regardless of the missing log device.
++	 */
++	spa->spa_import_flags |= ZFS_IMPORT_MISSING_LOG;
++
+ 	error = spa_load(spa, SPA_LOAD_TRYIMPORT, SPA_IMPORT_EXISTING);
+ 
+ 	/*
+diff --git a/tests/runfiles/common.run b/tests/runfiles/common.run
+index 083f0ef69..7792e2fb2 100644
+--- a/tests/runfiles/common.run
++++ b/tests/runfiles/common.run
+@@ -407,7 +407,7 @@ tests = ['zpool_import_001_pos', 'zpool_import_002_pos',
+     'import_cachefile_mirror_detached',
+     'import_cachefile_paths_changed',
+     'import_cachefile_shared_device',
+-    'import_devices_missing',
++    'import_devices_missing', 'import_log_missing',
+     'import_paths_changed',
+     'import_rewind_config_changed',
+     'import_rewind_device_replaced']
+diff --git a/tests/zfs-tests/tests/functional/cli_root/zpool_import/Makefile.am b/tests/zfs-tests/tests/functional/cli_root/zpool_import/Makefile.am
+index a8c9a31dc..4230ec557 100644
+--- a/tests/zfs-tests/tests/functional/cli_root/zpool_import/Makefile.am
++++ b/tests/zfs-tests/tests/functional/cli_root/zpool_import/Makefile.am
+@@ -12,6 +12,7 @@ dist_pkgdata_SCRIPTS = \
+ 	import_cachefile_paths_changed.ksh \
+ 	import_cachefile_shared_device.ksh \
+ 	import_devices_missing.ksh \
++	import_log_missing.ksh \
+ 	import_paths_changed.ksh \
+ 	import_rewind_config_changed.ksh \
+ 	import_rewind_device_replaced.ksh \
+diff --git a/tests/zfs-tests/tests/functional/cli_root/zpool_import/import_log_missing.ksh b/tests/zfs-tests/tests/functional/cli_root/zpool_import/import_log_missing.ksh
+new file mode 100755
+index 000000000..f12cac785
+--- /dev/null
++++ b/tests/zfs-tests/tests/functional/cli_root/zpool_import/import_log_missing.ksh
+@@ -0,0 +1,75 @@
++#!/bin/ksh -p
++
++#
++# This file and its contents are supplied under the terms of the
++# Common Development and Distribution License ("CDDL"), version 1.0.
++# You may only use this file in accordance with the terms of version
++# 1.0 of the CDDL.
++#
++# A full copy of the text of the CDDL should have accompanied this
++# source.  A copy of the CDDL is also available via the Internet at
++# http://www.illumos.org/license/CDDL.
++#
++
++. $STF_SUITE/tests/functional/cli_root/zpool_import/zpool_import.kshlib
++
++#
++# DESCRIPTION:
++#	Import with missing log device should not remove spare/cache.
++#
++# STRATEGY:
++#	1. Create a pool.
++#	2. Add spare, cache and log devices to the pool.
++#	3. Export the pool.
++#	4. Remove the log device.
++#	5. Import the pool with -m flag.
++#	6. Verify that spare and cache are still present in the pool.
++#
++
++verify_runnable "global"
++
++log_onexit cleanup
++
++function test_missing_log
++{
++	typeset poolcreate="$1"
++	typeset cachevdev="$2"
++	typeset sparevdev="$3"
++	typeset logvdev="$4"
++	typeset missingvdev="$4"
++
++	log_note "$0: pool '$poolcreate', adding $cachevdev, $sparevdev," \
++		"$logvdev then moving away $missingvdev."
++
++	log_must zpool create $TESTPOOL1 $poolcreate
++
++	log_must zpool add $TESTPOOL1 cache $cachevdev spare $sparevdev \
++		log $logvdev
++
++	log_must_busy zpool export $TESTPOOL1
++
++	log_must mv $missingvdev $BACKUP_DEVICE_DIR
++
++	log_must zpool import -m -d $DEVICE_DIR $TESTPOOL1
++
++	CACHE_PRESENT=$(zpool status -v $TESTPOOL1 | grep $cachevdev)
++
++	SPARE_PRESENT=$(zpool status -v $TESTPOOL1 | grep $sparevdev)
++
++	if [ -z "$CACHE_PRESENT"] || [ -z "SPARE_PRESENT"]
++	then
++		log_fail "cache/spare vdev missing after importing with missing" \
++			"log device"
++	fi
++
++	# Cleanup
++	log_must zpool destroy $TESTPOOL1
++
++	log_note ""
++}
++
++log_must mkdir -p $BACKUP_DEVICE_DIR
++
++test_missing_log "$VDEV0" "$VDEV1" "$VDEV2" "$VDEV3"
++
++log_pass "zpool import succeeded with missing log device"
+-- 
+2.39.2
+

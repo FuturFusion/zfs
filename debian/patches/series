@@ -27,3 +27,23 @@ cross-compile.patch
 0006-rootdelay-on-zfs-should-be-adaptive.patch
 0009-zdb-zero-pad-checksum-output.patch
 0010-zdb-zero-pad-checksum-output-follow-up.patch
+# 2.1.11+deb12u1
+0011-Fix-buffered-direct-mmap-I-O-race.patch
+0012-Linux-zfs_fillpage-should-handle-partial-pages-from-.patch
+0013-Fix-Detach-spare-vdev-in-case-if-resilvering-does-no.patch
+0014-Allow-MMP-to-bypass-waiting-for-other-threads.patch
+0015-zpool-import-m-also-removing-spare-and-cache-when-lo.patch
+0016-Wait-for-txg-sync-if-the-last-DRR_FREEOBJECTS-might-.patch
+0017-pam-Fix-buffer-overflow-in-pam-ZTS-tests-on-F38.patch
+0018-Fix-concurrent-resilvers-initiated-at-same-time.patch
+0019-Probe-vdevs-before-marking-removed.patch
+0020-Fix-NULL-pointer-dereference-when-doing-concurrent-s.patch
+0021-Revert-initramfs-use-mount.zfs-instead-of-mount.patch
+0022-zil-Don-t-expect-zio_shrink-to-succeed.patch
+0023-contrib-bash_completion.d-fix-error-spew-from-__zfs_.patch
+0024-Store-the-L2ARC-device-ashift-in-the-vdev-label.patch
+0025-zed-Fix-zed-ASSERT-on-slot-power-cycle.patch
+0026-zed-Reduce-log-noise-for-large-JBODs.patch
+0027-Linux-Never-sleep-in-kmem_cache_alloc-.-KM_NOSLEEP-1.patch
+0028-dnode_is_dirty-check-dnode-and-its-data-for-dirtines.patch
+0029-Zpool-can-start-allocating-from-metaslab-before-TRIM.patch

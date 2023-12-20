@@ -1,0 +1,104 @@
+From 1ca531971f176ae7b8ca440e836985ae1d7fa0ec Mon Sep 17 00:00:00 2001
+From: Jason King <jasonbking@users.noreply.github.com>
+Date: Thu, 12 Oct 2023 13:01:54 -0500
+Subject: [PATCH] Zpool can start allocating from metaslab before TRIMs have
+ completed
+
+When doing a manual TRIM on a zpool, the metaslab being TRIMmed is
+potentially re-enabled before all queued TRIM zios for that metaslab
+have completed. Since TRIM zios have the lowest priority, it is
+possible to get into a situation where allocations occur from the
+just re-enabled metaslab and cut ahead of queued TRIMs to the same
+metaslab.  If the ranges overlap, this will cause corruption.
+
+We were able to trigger this pretty consistently with a small single
+top-level vdev zpool (i.e. small number of metaslabs) with heavy
+parallel write activity while performing a manual TRIM against a
+somewhat 'slow' device (so TRIMs took a bit of time to complete).
+With the patch, we've not been able to recreate it since. It was on
+illumos, but inspection of the OpenZFS trim code looks like the
+relevant pieces are largely unchanged and so it appears it would be
+vulnerable to the same issue.
+
+Reviewed-by: Igor Kozhukhov <igor@dilos.org>
+Reviewed-by: Alexander Motin <mav@FreeBSD.org>
+Reviewed-by: Brian Behlendorf <behlendorf1@llnl.gov>
+Signed-off-by: Jason King <jking@racktopsystems.com>
+Illumos-issue: https://www.illumos.org/issues/15939
+Closes #15395
+---
+ module/zfs/vdev_trim.c | 28 +++++++++++++++++++---------
+ 1 file changed, 19 insertions(+), 9 deletions(-)
+
+diff --git a/module/zfs/vdev_trim.c b/module/zfs/vdev_trim.c
+index 92daed48f..c0ce2ac28 100644
+--- a/module/zfs/vdev_trim.c
++++ b/module/zfs/vdev_trim.c
+@@ -23,6 +23,7 @@
+  * Copyright (c) 2016 by Delphix. All rights reserved.
+  * Copyright (c) 2019 by Lawrence Livermore National Security, LLC.
+  * Copyright (c) 2021 Hewlett Packard Enterprise Development LP
++ * Copyright 2023 RackTop Systems, Inc.
+  */
+ 
+ #include <sys/spa.h>
+@@ -572,6 +573,7 @@ vdev_trim_ranges(trim_args_t *ta)
+ 	uint64_t extent_bytes_max = ta->trim_extent_bytes_max;
+ 	uint64_t extent_bytes_min = ta->trim_extent_bytes_min;
+ 	spa_t *spa = vd->vdev_spa;
++	int error = 0;
+ 
+ 	ta->trim_start_time = gethrtime();
+ 	ta->trim_bytes_done = 0;
+@@ -591,19 +593,32 @@ vdev_trim_ranges(trim_args_t *ta)
+ 		uint64_t writes_required = ((size - 1) / extent_bytes_max) + 1;
+ 
+ 		for (uint64_t w = 0; w < writes_required; w++) {
+-			int error;
+-
+ 			error = vdev_trim_range(ta, VDEV_LABEL_START_SIZE +
+ 			    rs_get_start(rs, ta->trim_tree) +
+ 			    (w *extent_bytes_max), MIN(size -
+ 			    (w * extent_bytes_max), extent_bytes_max));
+ 			if (error != 0) {
+-				return (error);
++				goto done;
+ 			}
+ 		}
+ 	}
+ 
+-	return (0);
++done:
++	/*
++	 * Make sure all TRIMs for this metaslab have completed before
++	 * returning. TRIM zios have lower priority over regular or syncing
++	 * zios, so all TRIM zios for this metaslab must complete before the
++	 * metaslab is re-enabled. Otherwise it's possible write zios to
++	 * this metaslab could cut ahead of still queued TRIM zios for this
++	 * metaslab causing corruption if the ranges overlap.
++	 */
++	mutex_enter(&vd->vdev_trim_io_lock);
++	while (vd->vdev_trim_inflight[0] > 0) {
++		cv_wait(&vd->vdev_trim_io_cv, &vd->vdev_trim_io_lock);
++	}
++	mutex_exit(&vd->vdev_trim_io_lock);
++
++	return (error);
+ }
+ 
+ static void
+@@ -922,11 +937,6 @@ vdev_trim_thread(void *arg)
+ 	}
+ 
+ 	spa_config_exit(spa, SCL_CONFIG, FTAG);
+-	mutex_enter(&vd->vdev_trim_io_lock);
+-	while (vd->vdev_trim_inflight[0] > 0) {
+-		cv_wait(&vd->vdev_trim_io_cv, &vd->vdev_trim_io_lock);
+-	}
+-	mutex_exit(&vd->vdev_trim_io_lock);
+ 
+ 	range_tree_destroy(ta.trim_tree);
+ 
+-- 
+2.39.2
+

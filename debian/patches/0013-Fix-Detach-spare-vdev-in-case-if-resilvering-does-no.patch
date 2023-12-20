@@ -1,0 +1,91 @@
+From a68dfdb88c88fe970343e49b48bfd3bb4cef99d2 Mon Sep 17 00:00:00 2001
+From: Ameer Hamza <106930537+ixhamza@users.noreply.github.com>
+Date: Wed, 19 Apr 2023 21:04:32 +0500
+Subject: [PATCH] Fix "Detach spare vdev in case if resilvering does not
+ happen"
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Spare vdev should detach from the pool when a disk is reinserted.
+However, spare detachment depends on the completion of resilvering,
+and if resilver does not schedule, the spare vdev keeps attached to
+the pool until the next resilvering. When a zfs pool contains
+several disks (25+ mirror), resilvering does not always happen when
+a disk is reinserted. In this patch, spare vdev is manually detached
+from the pool when resilvering does not occur and it has been tested
+on both Linux and FreeBSD.
+
+Reviewed-by: Brian Behlendorf <behlendorf1@llnl.gov>
+Reviewed-by: Alexander Motin <mav@FreeBSD.org>
+Signed-off-by: Ameer Hamza <ahamza@ixsystems.com>
+Closes #14722
+---
+ include/sys/spa.h |  1 +
+ module/zfs/spa.c  |  5 +++--
+ module/zfs/vdev.c | 12 +++++++++++-
+ 3 files changed, 15 insertions(+), 3 deletions(-)
+
+diff --git a/include/sys/spa.h b/include/sys/spa.h
+index fedadab45..07e09d1ec 100644
+--- a/include/sys/spa.h
++++ b/include/sys/spa.h
+@@ -785,6 +785,7 @@ extern int bpobj_enqueue_free_cb(void *arg, const blkptr_t *bp, dmu_tx_t *tx);
+ #define	SPA_ASYNC_L2CACHE_REBUILD		0x800
+ #define	SPA_ASYNC_L2CACHE_TRIM			0x1000
+ #define	SPA_ASYNC_REBUILD_DONE			0x2000
++#define	SPA_ASYNC_DETACH_SPARE			0x4000
+ 
+ /* device manipulation */
+ extern int spa_vdev_add(spa_t *spa, nvlist_t *nvroot);
+diff --git a/module/zfs/spa.c b/module/zfs/spa.c
+index 1ed79eed3..8bc51f777 100644
+--- a/module/zfs/spa.c
++++ b/module/zfs/spa.c
+@@ -6987,7 +6987,7 @@ spa_vdev_attach(spa_t *spa, uint64_t guid, nvlist_t *nvroot, int replacing,
+  * Detach a device from a mirror or replacing vdev.
+  *
+  * If 'replace_done' is specified, only detach if the parent
+- * is a replacing vdev.
++ * is a replacing or a spare vdev.
+  */
+ int
+ spa_vdev_detach(spa_t *spa, uint64_t guid, uint64_t pguid, int replace_done)
+@@ -8210,7 +8210,8 @@ spa_async_thread(void *arg)
+ 	 * If any devices are done replacing, detach them.
+ 	 */
+ 	if (tasks & SPA_ASYNC_RESILVER_DONE ||
+-	    tasks & SPA_ASYNC_REBUILD_DONE) {
++	    tasks & SPA_ASYNC_REBUILD_DONE ||
++	    tasks & SPA_ASYNC_DETACH_SPARE) {
+ 		spa_vdev_resilver_done(spa);
+ 	}
+ 
+diff --git a/module/zfs/vdev.c b/module/zfs/vdev.c
+index 4b9d7e7c0..ee0c1d862 100644
+--- a/module/zfs/vdev.c
++++ b/module/zfs/vdev.c
+@@ -4085,9 +4085,19 @@ vdev_online(spa_t *spa, uint64_t guid, uint64_t flags, vdev_state_t *newstate)
+ 
+ 	if (wasoffline ||
+ 	    (oldstate < VDEV_STATE_DEGRADED &&
+-	    vd->vdev_state >= VDEV_STATE_DEGRADED))
++	    vd->vdev_state >= VDEV_STATE_DEGRADED)) {
+ 		spa_event_notify(spa, vd, NULL, ESC_ZFS_VDEV_ONLINE);
+ 
++		/*
++		 * Asynchronously detach spare vdev if resilver or
++		 * rebuild is not required
++		 */
++		if (vd->vdev_unspare &&
++		    !dsl_scan_resilvering(spa->spa_dsl_pool) &&
++		    !dsl_scan_resilver_scheduled(spa->spa_dsl_pool) &&
++		    !vdev_rebuild_active(tvd))
++			spa_async_request(spa, SPA_ASYNC_DETACH_SPARE);
++	}
+ 	return (spa_vdev_state_exit(spa, vd, 0));
+ }
+ 
+-- 
+2.39.2
+

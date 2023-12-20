@@ -1,0 +1,80 @@
+From f28cd347c4e1f5853873e76970bcfdecbc48efed Mon Sep 17 00:00:00 2001
+From: George Amanakis <gamanakis@gmail.com>
+Date: Wed, 14 Jun 2023 17:01:17 +0200
+Subject: [PATCH] Store the L2ARC device ashift in the vdev label
+
+If this is not done, and the pool has an ashift other than the default
+(at the moment 9) then the following happens:
+
+1) vdev_alloc() assigns the ashift of the pool to L2ARC device, but
+   upon export it is not stored anywhere
+2) at the first import, vdev_open() sees an vdev_ashift() of 0 and
+   assigns the logical_ashift, which is 9
+3) reading the contents of L2ARC, including the header fails
+4) L2ARC buffers are not restored in ARC.
+
+Reviewed-by: Brian Behlendorf <behlendorf1@llnl.gov>
+Signed-off-by: George Amanakis <gamanakis@gmail.com>
+Closes #14313
+Closes #14963
+---
+ module/zfs/vdev_label.c                       |  3 +++
+ .../l2arc/persist_l2arc_001_pos.ksh           | 19 ++++++++-----------
+ 2 files changed, 11 insertions(+), 11 deletions(-)
+
+diff --git a/module/zfs/vdev_label.c b/module/zfs/vdev_label.c
+index ec6bbc6fc..faf89041b 100644
+--- a/module/zfs/vdev_label.c
++++ b/module/zfs/vdev_label.c
+@@ -468,6 +468,9 @@ vdev_config_generate(spa_t *spa, vdev_t *vd, boolean_t getstats,
+ 	if (vd->vdev_isspare)
+ 		fnvlist_add_uint64(nv, ZPOOL_CONFIG_IS_SPARE, 1);
+ 
++	if (flags & VDEV_CONFIG_L2CACHE)
++		fnvlist_add_uint64(nv, ZPOOL_CONFIG_ASHIFT, vd->vdev_ashift);
++
+ 	if (!(flags & (VDEV_CONFIG_SPARE | VDEV_CONFIG_L2CACHE)) &&
+ 	    vd == vd->vdev_top) {
+ 		fnvlist_add_uint64(nv, ZPOOL_CONFIG_METASLAB_ARRAY,
+diff --git a/tests/zfs-tests/tests/functional/l2arc/persist_l2arc_001_pos.ksh b/tests/zfs-tests/tests/functional/l2arc/persist_l2arc_001_pos.ksh
+index 0a9049490..8963803f6 100755
+--- a/tests/zfs-tests/tests/functional/l2arc/persist_l2arc_001_pos.ksh
++++ b/tests/zfs-tests/tests/functional/l2arc/persist_l2arc_001_pos.ksh
+@@ -27,15 +27,14 @@
+ #
+ # STRATEGY:
+ #	1. Create pool with a cache device.
+-#	2. Export and re-import pool without writing any data.
+-#	3. Create a random file in that pool and random read for 10 sec.
+-#	4. Export pool.
+-#	5. Read the amount of log blocks written from the header of the
++#	2. Create a random file in that pool and random read for 10 sec.
++#	3. Export pool.
++#	4. Read the amount of log blocks written from the header of the
+ #		L2ARC device.
+-#	6. Import pool.
+-#	7. Read the amount of log blocks rebuilt in arcstats and compare to
++#	5. Import pool.
++#	6. Read the amount of log blocks rebuilt in arcstats and compare to
+ #		(5).
+-#	8. Check if the labels of the L2ARC device are intact.
++#	7. Check if the labels of the L2ARC device are intact.
+ #
+ #	* We can predict the minimum bytes of L2ARC restored if we subtract
+ #	from the effective size of the cache device the bytes l2arc_evict()
+@@ -75,10 +74,8 @@ export FILE_SIZE=$(( floor($fill_mb / $NUMJOBS) ))M
+ 
+ log_must truncate -s ${cache_sz}M $VDEV_CACHE
+ 
+-log_must zpool create -f $TESTPOOL $VDEV cache $VDEV_CACHE
+-
+-log_must zpool export $TESTPOOL
+-log_must zpool import -d $VDIR $TESTPOOL
++log_must zpool create -f -o ashift=12 $TESTPOOL $VDEV
++log_must zpool add $TESTPOOL cache $VDEV_CACHE
+ 
+ log_must fio $FIO_SCRIPTS/mkfiles.fio
+ log_must fio $FIO_SCRIPTS/random_reads.fio
+-- 
+2.39.2
+

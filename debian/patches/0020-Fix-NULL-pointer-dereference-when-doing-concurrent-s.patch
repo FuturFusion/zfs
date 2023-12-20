@@ -1,0 +1,65 @@
+From 671b1af1bc4b20ddd939c2ede22748bd027d30be Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Lu=C3=ADs=20Henriques?=
+ <73643340+lumigch@users.noreply.github.com>
+Date: Tue, 30 May 2023 23:15:24 +0100
+Subject: [PATCH] Fix NULL pointer dereference when doing concurrent 'send'
+ operations
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A NULL pointer will occur when doing a 'zfs send -S' on a dataset that
+is still being received.  The problem is that the new 'send' will
+rightfully fail to own the datasets (i.e. dsl_dataset_own_force() will
+fail), but then dmu_send() will still do the dsl_dataset_disown().
+
+Reviewed-by: Brian Behlendorf <behlendorf1@llnl.gov>
+Signed-off-by: Luís Henriques <henrix@camandro.org>
+Closes #14903
+Closes #14890
+---
+ module/zfs/dmu_send.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/module/zfs/dmu_send.c b/module/zfs/dmu_send.c
+index cd9ecc07f..0dd1ec210 100644
+--- a/module/zfs/dmu_send.c
++++ b/module/zfs/dmu_send.c
+@@ -2797,6 +2797,7 @@ dmu_send(const char *tosnap, const char *fromsnap, boolean_t embedok,
+ 			}
+ 
+ 			if (err == 0) {
++				owned = B_TRUE;
+ 				err = zap_lookup(dspp.dp->dp_meta_objset,
+ 				    dspp.to_ds->ds_object,
+ 				    DS_FIELD_RESUME_TOGUID, 8, 1,
+@@ -2810,21 +2811,24 @@ dmu_send(const char *tosnap, const char *fromsnap, boolean_t embedok,
+ 				    sizeof (dspp.saved_toname),
+ 				    dspp.saved_toname);
+ 			}
+-			if (err != 0)
++			/* Only disown if there was an error in the lookups */
++			if (owned && (err != 0))
+ 				dsl_dataset_disown(dspp.to_ds, dsflags, FTAG);
+ 
+ 			kmem_strfree(name);
+ 		} else {
+ 			err = dsl_dataset_own(dspp.dp, tosnap, dsflags,
+ 			    FTAG, &dspp.to_ds);
++			if (err == 0)
++				owned = B_TRUE;
+ 		}
+-		owned = B_TRUE;
+ 	} else {
+ 		err = dsl_dataset_hold_flags(dspp.dp, tosnap, dsflags, FTAG,
+ 		    &dspp.to_ds);
+ 	}
+ 
+ 	if (err != 0) {
++		/* Note: dsl dataset is not owned at this point */
+ 		dsl_pool_rele(dspp.dp, FTAG);
+ 		return (err);
+ 	}
+-- 
+2.39.2
+

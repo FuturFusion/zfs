@@ -1,0 +1,56 @@
+From 4a5950a1298aedabe2cf730c5dc9d36cebbef79c Mon Sep 17 00:00:00 2001
+From: Richard Yao <richard.yao@alumni.stonybrook.edu>
+Date: Wed, 1 Mar 2023 16:19:47 -0500
+Subject: [PATCH] Linux: zfs_fillpage() should handle partial pages from end of
+ file
+
+After 89cd2197b94986d315b9b1be707b645baf59af4f was merged, Clang's
+static analyzer began complaining about a dead assignment in
+`zfs_fillpage()`. Upon inspection, I noticed that the dead assignment
+was because we are not using the calculated io_len that we should use to
+avoid asking the DMU to read past the end of a file. This should result
+in `dmu_buf_hold_array_by_dnode()` calling `zfs_panic_recover()`.
+
+This issue predates 89cd2197b94986d315b9b1be707b645baf59af4f, but its
+simplification of zfs_fillpage() eliminated the only use of the
+assignment to io_len, which made Clang's static analyzer complain about
+the issue.
+
+Also, as a precaution, we add an assertion that io_offset < i_size. If
+this ever fails, bad things will happen. Otherwise, we are blindly
+trusting the kernel not to give us invalid offsets. We continue to
+blindly trust it on non-debug kernels.
+
+Reviewed-by: Brian Behlendorf <behlendorf1@llnl.gov>
+Reviewed-by: Brian Atkinson <batkinson@lanl.gov>
+Signed-off-by: Richard Yao <richard.yao@alumni.stonybrook.edu>
+Closes #14534
+---
+ module/os/linux/zfs/zfs_vnops_os.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/module/os/linux/zfs/zfs_vnops_os.c b/module/os/linux/zfs/zfs_vnops_os.c
+index 27e1ab420..c17144808 100644
+--- a/module/os/linux/zfs/zfs_vnops_os.c
++++ b/module/os/linux/zfs/zfs_vnops_os.c
+@@ -3784,12 +3784,16 @@ zfs_fillpage(struct inode *ip, struct page *pp)
+ 	u_offset_t io_off = page_offset(pp);
+ 	size_t io_len = PAGE_SIZE;
+ 
++	ASSERT3U(io_off, <, i_size);
++
+ 	if (io_off + io_len > i_size)
+ 		io_len = i_size - io_off;
+ 
+ 	void *va = kmap(pp);
+ 	int error = dmu_read(zfsvfs->z_os, ITOZ(ip)->z_id, io_off,
+-	    PAGE_SIZE, va, DMU_READ_PREFETCH);
++	    io_len, va, DMU_READ_PREFETCH);
++	if (io_len != PAGE_SIZE)
++		memset((char *)va + io_len, 0, PAGE_SIZE - io_len);
+ 	kunmap(pp);
+ 
+ 	if (error) {
+-- 
+2.39.2
+

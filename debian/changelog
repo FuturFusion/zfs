@@ -4,8 +4,9 @@ zfs-linux (2.2.6-1~bpo12+1) bookworm-backports; urgency=medium
   * New upstream version 2.2.6
     - compatibile with Linux 4.18 - 6.11rc
   * d/patches: refresh patches & removed applied patch
+  * d/symbols: mark some SPL polyfill symbols as optional
 
- -- Shengqi Chen <harry-chen@outlook.com>  Thu, 05 Sep 2024 10:56:11 +0800
+ -- Shengqi Chen <harry-chen@outlook.com>  Thu, 12 Sep 2024 22:29:42 +0800
 
 zfs-linux (2.2.5-1~bpo12+1) bookworm-backports; urgency=medium
 

@@ -36,3 +36,4 @@ cross-compile.patch
 0027-Linux-Never-sleep-in-kmem_cache_alloc-.-KM_NOSLEEP-1.patch
 0028-dnode_is_dirty-check-dnode-and-its-data-for-dirtines.patch
 0029-Zpool-can-start-allocating-from-metaslab-before-TRIM.patch
+0030-libshare-nfs-pass-through-ipv6-addresses-in-bracket.patch

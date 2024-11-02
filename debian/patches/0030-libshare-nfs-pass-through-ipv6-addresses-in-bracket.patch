@@ -1,0 +1,230 @@
+From 6cb5e1e7591da20af3a15793e022345a73e40fb7 Mon Sep 17 00:00:00 2001
+From: felixdoerre <felixdoerre@users.noreply.github.com>
+Date: Wed, 20 Oct 2021 19:40:00 +0200
+Subject: [PATCH] libshare: nfs: pass through ipv6 addresses in bracket
+ notation
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Recognize when the host part of a sharenfs attribute is an ipv6
+Literal and pass that through without modification.
+
+Reviewed-by: Brian Behlendorf <behlendorf1@llnl.gov>
+Signed-off-by: Felix Dörre <felix@dogcraft.de>
+Closes: #11171
+Closes #11939
+Closes: #1894
+---
+ lib/libshare/os/linux/nfs.c                   | 47 +++++++++--
+ man/man8/zfs.8                                |  2 +-
+ tests/runfiles/linux.run                      |  2 +-
+ .../functional/cli_root/zfs_share/Makefile.am |  1 +
+ .../cli_root/zfs_share/zfs_share_007_neg.ksh  |  2 +-
+ .../cli_root/zfs_share/zfs_share_013_pos.ksh  | 80 +++++++++++++++++++
+ 6 files changed, 126 insertions(+), 8 deletions(-)
+ create mode 100755 tests/zfs-tests/tests/functional/cli_root/zfs_share/zfs_share_013_pos.ksh
+
+diff --git a/lib/libshare/os/linux/nfs.c b/lib/libshare/os/linux/nfs.c
+index bd578adeec5d..4f754aabd3a3 100644
+--- a/lib/libshare/os/linux/nfs.c
++++ b/lib/libshare/os/linux/nfs.c
+@@ -136,8 +136,9 @@ foreach_nfs_host_cb(const char *opt, const char *value, void *pcookie)
+ {
+ 	int error;
+ 	const char *access;
+-	char *host_dup, *host, *next;
++	char *host_dup, *host, *next, *v6Literal;
+ 	nfs_host_cookie_t *udata = (nfs_host_cookie_t *)pcookie;
++	int cidr_len;
+ 
+ #ifdef DEBUG
+ 	fprintf(stderr, "foreach_nfs_host_cb: key=%s, value=%s\n", opt, value);
+@@ -160,10 +161,46 @@ foreach_nfs_host_cb(const char *opt, const char *value, void *pcookie)
+ 		host = host_dup;
+ 
+ 		do {
+-			next = strchr(host, ':');
+-			if (next != NULL) {
+-				*next = '\0';
+-				next++;
++			if (*host == '[') {
++				host++;
++				v6Literal = strchr(host, ']');
++				if (v6Literal == NULL) {
++					free(host_dup);
++					return (SA_SYNTAX_ERR);
++				}
++				if (v6Literal[1] == '\0') {
++					*v6Literal = '\0';
++					next = NULL;
++				} else if (v6Literal[1] == '/') {
++					next = strchr(v6Literal + 2, ':');
++					if (next == NULL) {
++						cidr_len =
++						    strlen(v6Literal + 1);
++						memmove(v6Literal,
++						    v6Literal + 1,
++						    cidr_len);
++						v6Literal[cidr_len] = '\0';
++					} else {
++						cidr_len = next - v6Literal - 1;
++						memmove(v6Literal,
++						    v6Literal + 1,
++						    cidr_len);
++						v6Literal[cidr_len] = '\0';
++						next++;
++					}
++				} else if (v6Literal[1] == ':') {
++					*v6Literal = '\0';
++					next = v6Literal + 2;
++				} else {
++					free(host_dup);
++					return (SA_SYNTAX_ERR);
++				}
++			} else {
++				next = strchr(host, ':');
++				if (next != NULL) {
++					*next = '\0';
++					next++;
++				}
+ 			}
+ 
+ 			error = udata->callback(udata->filename,
+diff --git a/man/man8/zfs.8 b/man/man8/zfs.8
+index fca1ba00da7d..48453ef46c0d 100644
+--- a/man/man8/zfs.8
++++ b/man/man8/zfs.8
+@@ -545,7 +545,7 @@ access for a set of IP addresses and to enable root access for system
+ on the
+ .Ar tank/home
+ file system:
+-.Dl # Nm zfs Cm set Sy sharenfs Ns = Ns ' Ns Ar rw Ns =@123.123.0.0/16,root= Ns Ar neo Ns ' tank/home
++.Dl # Nm zfs Cm set Sy sharenfs Ns = Ns ' Ns Ar rw Ns =@123.123.0.0/16:[::1],root= Ns Ar neo Ns ' tank/home
+ .Pp
+ If you are using DNS for host name resolution,
+ specify the fully-qualified hostname.
+diff --git a/tests/runfiles/linux.run b/tests/runfiles/linux.run
+index b7831c3acfd1..01e1f79e5852 100644
+--- a/tests/runfiles/linux.run
++++ b/tests/runfiles/linux.run
+@@ -53,7 +53,7 @@ tags = ['functional', 'cli_root', 'zfs_mount']
+ 
+ [tests/functional/cli_root/zfs_share:Linux]
+ tests = ['zfs_share_005_pos', 'zfs_share_007_neg', 'zfs_share_009_neg',
+-    'zfs_share_012_pos']
++    'zfs_share_012_pos', 'zfs_share_013_pos']
+ tags = ['functional', 'cli_root', 'zfs_share']
+ 
+ [tests/functional/cli_root/zfs_sysfs:Linux]
+diff --git a/tests/zfs-tests/tests/functional/cli_root/zfs_share/Makefile.am b/tests/zfs-tests/tests/functional/cli_root/zfs_share/Makefile.am
+index bf33ed038d78..35332f822e6c 100644
+--- a/tests/zfs-tests/tests/functional/cli_root/zfs_share/Makefile.am
++++ b/tests/zfs-tests/tests/functional/cli_root/zfs_share/Makefile.am
+@@ -14,6 +14,7 @@ dist_pkgdata_SCRIPTS = \
+ 	zfs_share_010_neg.ksh \
+ 	zfs_share_011_pos.ksh \
+ 	zfs_share_012_pos.ksh \
++	zfs_share_013_pos.ksh \
+ 	zfs_share_concurrent_shares.ksh
+ 
+ dist_pkgdata_DATA = \
+diff --git a/tests/zfs-tests/tests/functional/cli_root/zfs_share/zfs_share_007_neg.ksh b/tests/zfs-tests/tests/functional/cli_root/zfs_share/zfs_share_007_neg.ksh
+index 29ca9a143a27..c64157cee601 100755
+--- a/tests/zfs-tests/tests/functional/cli_root/zfs_share/zfs_share_007_neg.ksh
++++ b/tests/zfs-tests/tests/functional/cli_root/zfs_share/zfs_share_007_neg.ksh
+@@ -51,7 +51,7 @@ function cleanup {
+ 
+ set -A badopts \
+     "r0" "r0=machine1" "r0=machine1:machine2" \
+-    "-g" "-b" "-c" "-d" "--invalid" \
++    "-g" "-b" "-c" "-d" "--invalid" "rw=[::1]a:[::2]" "rw=[::1" \
+     "$TESTPOOL" "$TESTPOOL/$TESTFS" "$TESTPOOL\$TESTCTR\$TESTFS1"
+ 
+ log_assert "Verify that invalid share parameters and options are caught."
+diff --git a/tests/zfs-tests/tests/functional/cli_root/zfs_share/zfs_share_013_pos.ksh b/tests/zfs-tests/tests/functional/cli_root/zfs_share/zfs_share_013_pos.ksh
+new file mode 100755
+index 000000000000..150eddac0ebb
+--- /dev/null
++++ b/tests/zfs-tests/tests/functional/cli_root/zfs_share/zfs_share_013_pos.ksh
+@@ -0,0 +1,80 @@
++#!/bin/ksh -p
++#
++# CDDL HEADER START
++#
++# The contents of this file are subject to the terms of the
++# Common Development and Distribution License (the "License").
++# You may not use this file except in compliance with the License.
++#
++# You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
++# or http://www.opensolaris.org/os/licensing.
++# See the License for the specific language governing permissions
++# and limitations under the License.
++#
++# When distributing Covered Code, include this CDDL HEADER in each
++# file and include the License file at usr/src/OPENSOLARIS.LICENSE.
++# If applicable, add the following below this CDDL HEADER, with the
++# fields enclosed by brackets "[]" replaced with your own identifying
++# information: Portions Copyright [yyyy] [name of copyright owner]
++#
++# CDDL HEADER END
++#
++
++#
++# Copyright (c) 2020, Felix Dörre
++#
++
++. $STF_SUITE/include/libtest.shlib
++
++#
++# DESCRIPTION:
++# Verify that NFS share options including ipv6 literals are parsed and propagated correctly.
++#
++
++verify_runnable "global"
++
++function cleanup
++{
++	log_must zfs set sharenfs=off $TESTPOOL/$TESTFS
++	is_shared $TESTPOOL/$TESTFS && \
++		log_must unshare_fs $TESTPOOL/$TESTFS
++}
++
++log_onexit cleanup
++
++cleanup
++
++log_must zfs set sharenfs="rw=[::1]" $TESTPOOL/$TESTFS
++output=$(showshares_nfs 2>&1)
++log_must grep "::1(" <<< "$output" > /dev/null
++
++log_must zfs set sharenfs="rw=[2::3]" $TESTPOOL/$TESTFS
++output=$(showshares_nfs 2>&1)
++log_must grep "2::3(" <<< "$output" > /dev/null
++
++log_must zfs set sharenfs="rw=[::1]:[2::3]" $TESTPOOL/$TESTFS
++output=$(showshares_nfs 2>&1)
++log_must grep "::1(" <<< "$output" > /dev/null
++log_must grep "2::3(" <<< "$output" > /dev/null
++
++log_must zfs set sharenfs="rw=[::1]/64" $TESTPOOL/$TESTFS
++output=$(showshares_nfs 2>&1)
++log_must grep "::1/64(" <<< "$output" > /dev/null
++
++log_must zfs set sharenfs="rw=[2::3]/128" $TESTPOOL/$TESTFS
++output=$(showshares_nfs 2>&1)
++log_must grep "2::3/128(" <<< "$output" > /dev/null
++
++log_must zfs set sharenfs="rw=[::1]/32:[2::3]/128" $TESTPOOL/$TESTFS
++output=$(showshares_nfs 2>&1)
++log_must grep "::1/32(" <<< "$output" > /dev/null
++log_must grep "2::3/128(" <<< "$output" > /dev/null
++
++log_must zfs set sharenfs="rw=[::1]:[2::3]/64:[2a01:1234:1234:1234:aa34:234:1234:1234]:1.2.3.4/24" $TESTPOOL/$TESTFS
++output=$(showshares_nfs 2>&1)
++log_must grep "::1(" <<< "$output" > /dev/null
++log_must grep "2::3/64(" <<< "$output" > /dev/null
++log_must grep "2a01:1234:1234:1234:aa34:234:1234:1234(" <<< "$output" > /dev/null
++log_must grep "1\\.2\\.3\\.4/24(" <<< "$output" > /dev/null
++
++log_pass "NFS share ip address propagated correctly."

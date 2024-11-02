@@ -2,9 +2,12 @@ zfs-linux (2.1.11-1+deb12u1) UNRELEASED; urgency=medium
 
   * dch: typo fix
   * New symbols for libzfs4linux and libzpool5linux
-  * d/patches: cherry-pick for stability issues (Closes: #1056752)
+  * d/patches: cherry-pick upstream fixes for stability issues
+    + fix dnode dirty test (Closes: #1056752, #1063497, CVE-2023-49298)
+    + fix sharenfx IPv6 address parsing (Closes: CVE-2013-20001)
+    + and some fixes related to NULL pointer, memory allocation, etc.
 
- -- Aron Xu <aron@debian.org>  Wed, 20 Dec 2023 11:29:51 +0800
+ -- Shengqi Chen <harry-chen@outlook.com>  Sat, 02 Nov 2024 15:34:23 +0800
 
 zfs-linux (2.1.11-1) unstable; urgency=medium
 

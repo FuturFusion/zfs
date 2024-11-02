@@ -25,11 +25,9 @@ Closes: #1894
  6 files changed, 126 insertions(+), 8 deletions(-)
  create mode 100755 tests/zfs-tests/tests/functional/cli_root/zfs_share/zfs_share_013_pos.ksh
 
-diff --git a/lib/libshare/os/linux/nfs.c b/lib/libshare/os/linux/nfs.c
-index bd578adeec5d..4f754aabd3a3 100644
 --- a/lib/libshare/os/linux/nfs.c
 +++ b/lib/libshare/os/linux/nfs.c
-@@ -136,8 +136,9 @@ foreach_nfs_host_cb(const char *opt, const char *value, void *pcookie)
+@@ -180,8 +180,9 @@
  {
  	int error;
  	const char *access;
@@ -40,7 +38,7 @@ index bd578adeec5d..4f754aabd3a3 100644
  
  #ifdef DEBUG
  	fprintf(stderr, "foreach_nfs_host_cb: key=%s, value=%s\n", opt, value);
-@@ -160,10 +161,46 @@ foreach_nfs_host_cb(const char *opt, const char *value, void *pcookie)
+@@ -204,10 +205,46 @@
  		host = host_dup;
  
  		do {
@@ -91,11 +89,9 @@ index bd578adeec5d..4f754aabd3a3 100644
  			}
  
  			error = udata->callback(udata->filename,
-diff --git a/man/man8/zfs.8 b/man/man8/zfs.8
-index fca1ba00da7d..48453ef46c0d 100644
 --- a/man/man8/zfs.8
 +++ b/man/man8/zfs.8
-@@ -545,7 +545,7 @@ access for a set of IP addresses and to enable root access for system
+@@ -545,7 +545,7 @@
  on the
  .Ar tank/home
  file system:
@@ -104,11 +100,9 @@ index fca1ba00da7d..48453ef46c0d 100644
  .Pp
  If you are using DNS for host name resolution,
  specify the fully-qualified hostname.
-diff --git a/tests/runfiles/linux.run b/tests/runfiles/linux.run
-index b7831c3acfd1..01e1f79e5852 100644
 --- a/tests/runfiles/linux.run
 +++ b/tests/runfiles/linux.run
-@@ -53,7 +53,7 @@ tags = ['functional', 'cli_root', 'zfs_mount']
+@@ -53,7 +53,7 @@
  
  [tests/functional/cli_root/zfs_share:Linux]
  tests = ['zfs_share_005_pos', 'zfs_share_007_neg', 'zfs_share_009_neg',
@@ -117,11 +111,9 @@ index b7831c3acfd1..01e1f79e5852 100644
  tags = ['functional', 'cli_root', 'zfs_share']
  
  [tests/functional/cli_root/zfs_sysfs:Linux]
-diff --git a/tests/zfs-tests/tests/functional/cli_root/zfs_share/Makefile.am b/tests/zfs-tests/tests/functional/cli_root/zfs_share/Makefile.am
-index bf33ed038d78..35332f822e6c 100644
 --- a/tests/zfs-tests/tests/functional/cli_root/zfs_share/Makefile.am
 +++ b/tests/zfs-tests/tests/functional/cli_root/zfs_share/Makefile.am
-@@ -14,6 +14,7 @@ dist_pkgdata_SCRIPTS = \
+@@ -14,6 +14,7 @@
  	zfs_share_010_neg.ksh \
  	zfs_share_011_pos.ksh \
  	zfs_share_012_pos.ksh \
@@ -129,11 +121,9 @@ index bf33ed038d78..35332f822e6c 100644
  	zfs_share_concurrent_shares.ksh
  
  dist_pkgdata_DATA = \
-diff --git a/tests/zfs-tests/tests/functional/cli_root/zfs_share/zfs_share_007_neg.ksh b/tests/zfs-tests/tests/functional/cli_root/zfs_share/zfs_share_007_neg.ksh
-index 29ca9a143a27..c64157cee601 100755
 --- a/tests/zfs-tests/tests/functional/cli_root/zfs_share/zfs_share_007_neg.ksh
 +++ b/tests/zfs-tests/tests/functional/cli_root/zfs_share/zfs_share_007_neg.ksh
-@@ -51,7 +51,7 @@ function cleanup {
+@@ -51,7 +51,7 @@
  
  set -A badopts \
      "r0" "r0=machine1" "r0=machine1:machine2" \
@@ -142,9 +132,6 @@ index 29ca9a143a27..c64157cee601 100755
      "$TESTPOOL" "$TESTPOOL/$TESTFS" "$TESTPOOL\$TESTCTR\$TESTFS1"
  
  log_assert "Verify that invalid share parameters and options are caught."
-diff --git a/tests/zfs-tests/tests/functional/cli_root/zfs_share/zfs_share_013_pos.ksh b/tests/zfs-tests/tests/functional/cli_root/zfs_share/zfs_share_013_pos.ksh
-new file mode 100755
-index 000000000000..150eddac0ebb
 --- /dev/null
 +++ b/tests/zfs-tests/tests/functional/cli_root/zfs_share/zfs_share_013_pos.ksh
 @@ -0,0 +1,80 @@

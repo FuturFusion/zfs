@@ -14,11 +14,9 @@ Closes #14908
  contrib/initramfs/scripts/zfs | 6 +++---
  1 file changed, 3 insertions(+), 3 deletions(-)
 
-diff --git a/contrib/initramfs/scripts/zfs b/contrib/initramfs/scripts/zfs
-index 4ce739fda..3c51b53ee 100644
 --- a/contrib/initramfs/scripts/zfs
 +++ b/contrib/initramfs/scripts/zfs
-@@ -326,7 +326,7 @@ mount_fs()
+@@ -342,7 +342,7 @@
  
  	# Need the _original_ datasets mountpoint!
  	mountpoint=$(get_fs_value "$fs" mountpoint)
@@ -27,7 +25,7 @@ index 4ce739fda..3c51b53ee 100644
  	if [ "$mountpoint" = "legacy" ] || [ "$mountpoint" = "none" ]; then
  		# Can't use the mountpoint property. Might be one of our
  		# clones. Check the 'org.zol:mountpoint' property set in
-@@ -343,7 +343,7 @@ mount_fs()
+@@ -359,7 +359,7 @@
  			fi
  			# Don't use mount.zfs -o zfsutils for legacy mountpoint
  			if [ "$mountpoint" = "legacy" ]; then
@@ -36,7 +34,7 @@ index 4ce739fda..3c51b53ee 100644
  			fi
  			# Last hail-mary: Hope 'rootmnt' is set!
  			mountpoint=""
-@@ -914,7 +914,7 @@ mountroot()
+@@ -930,7 +930,7 @@
  		echo "       not specified on the kernel command line."
  		echo ""
  		echo "Manually mount the root filesystem on $rootmnt and then exit."
@@ -45,6 +43,3 @@ index 4ce739fda..3c51b53ee 100644
  		shell
  	fi
  
--- 
-2.39.2
-

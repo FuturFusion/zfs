@@ -28,7 +28,6 @@ cross-compile.patch
 0009-zdb-zero-pad-checksum-output.patch
 0010-zdb-zero-pad-checksum-output-follow-up.patch
 # 2.1.11+deb12u1
-0012-Linux-zfs_fillpage-should-handle-partial-pages-from-.patch
 0013-Fix-Detach-spare-vdev-in-case-if-resilvering-does-no.patch
 0020-Fix-NULL-pointer-dereference-when-doing-concurrent-s.patch
 0021-Revert-initramfs-use-mount.zfs-instead-of-mount.patch

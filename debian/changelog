@@ -2,6 +2,7 @@ zfs-linux (2.2.7-1~bpo12+1) bookworm-backports; urgency=medium
 
   [ Shengqi Chen ]
   * Rebuild 2.2.7-1 for bookworm-backports.
+  * Cherry-pick patch from 2.2.7-2 to fix compilation on armel.
 
  -- Shengqi Chen <harry-chen@outlook.com>  Wed, 25 Dec 2024 15:51:56 +0800
 

@@ -182,13 +182,13 @@ Depends: dkms (>> 2.1.1.2-5),
          file,
          libc6-dev | libc-dev,
          lsb-release,
-         python3-distutils | libpython3-stdlib (<< 3.6.4),
+         libpython3-stdlib,
          ${misc:Depends},
          ${perl:Depends}
 Recommends: zfs-zed, zfsutils-linux (>= ${source:Version}), ${linux:Recommends}
 # suggests debhelper because e.g. `dkms mkdeb -m zfs -v 0.8.2` needs dh_testdir (#909183)
 Suggests: debhelper
-Breaks: spl-dkms (<< 0.8.0~rc1)
+Breaks: spl-dkms (<< 0.8.0~rc1), zfs-fuse
 Replaces: spl-dkms
 Provides: zfs-modules
 Description: OpenZFS filesystem kernel modules for Linux

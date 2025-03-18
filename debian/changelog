@@ -1,3 +1,9 @@
+zfs-linux (2.3.1-1~bpo12+1) bookworm-backports; urgency=medium
+
+  * Rebuild for bookworm-backports.
+
+ -- Shengqi Chen <harry@debian.org>  Tue, 18 Mar 2025 20:33:56 +0800
+
 zfs-linux (2.3.1-1) unstable; urgency=medium
 
   * New upstream version 2.3.1

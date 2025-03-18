@@ -77,8 +77,8 @@ AC_DEFUN([ZFS_AC_KERNEL_TEST_SRC], [
 	ZFS_AC_KERNEL_SRC_SGET
 	ZFS_AC_KERNEL_SRC_VFS_FILEMAP_DIRTY_FOLIO
 	ZFS_AC_KERNEL_SRC_VFS_READ_FOLIO
+	ZFS_AC_KERNEL_SRC_VFS_MIGRATE_FOLIO
 	ZFS_AC_KERNEL_SRC_VFS_FSYNC_2ARGS
-	ZFS_AC_KERNEL_SRC_VFS_DIRECT_IO
 	ZFS_AC_KERNEL_SRC_VFS_READPAGES
 	ZFS_AC_KERNEL_SRC_VFS_SET_PAGE_DIRTY_NOBUFFERS
 	ZFS_AC_KERNEL_SRC_VFS_IOV_ITER
@@ -127,6 +127,7 @@ AC_DEFUN([ZFS_AC_KERNEL_TEST_SRC], [
 	ZFS_AC_KERNEL_SRC_MM_PAGE_SIZE
 	ZFS_AC_KERNEL_SRC_MM_PAGE_MAPPING
 	ZFS_AC_KERNEL_SRC_FILE
+	ZFS_AC_KERNEL_SRC_PIN_USER_PAGES
 	case "$host_cpu" in
 		powerpc*)
 			ZFS_AC_KERNEL_SRC_CPU_HAS_FEATURE
@@ -187,8 +188,8 @@ AC_DEFUN([ZFS_AC_KERNEL_TEST_RESULT], [
 	ZFS_AC_KERNEL_SGET
 	ZFS_AC_KERNEL_VFS_FILEMAP_DIRTY_FOLIO
 	ZFS_AC_KERNEL_VFS_READ_FOLIO
+	ZFS_AC_KERNEL_VFS_MIGRATE_FOLIO
 	ZFS_AC_KERNEL_VFS_FSYNC_2ARGS
-	ZFS_AC_KERNEL_VFS_DIRECT_IO
 	ZFS_AC_KERNEL_VFS_READPAGES
 	ZFS_AC_KERNEL_VFS_SET_PAGE_DIRTY_NOBUFFERS
 	ZFS_AC_KERNEL_VFS_IOV_ITER
@@ -238,6 +239,7 @@ AC_DEFUN([ZFS_AC_KERNEL_TEST_RESULT], [
 	ZFS_AC_KERNEL_MM_PAGE_MAPPING
 	ZFS_AC_KERNEL_1ARG_ASSIGN_STR
 	ZFS_AC_KERNEL_FILE
+	ZFS_AC_KERNEL_PIN_USER_PAGES
 	case "$host_cpu" in
 		powerpc*)
 			ZFS_AC_KERNEL_CPU_HAS_FEATURE
@@ -421,10 +423,36 @@ AC_DEFUN([ZFS_AC_KERNEL], [
 
 	AC_MSG_RESULT([$kernsrcver])
 
-	AS_VERSION_COMPARE([$kernsrcver], [$ZFS_META_KVER_MIN], [
-		 AC_MSG_ERROR([
+	AX_COMPARE_VERSION([$kernsrcver], [ge], [$ZFS_META_KVER_MIN], [], [
+		AC_MSG_ERROR([
 	*** Cannot build against kernel version $kernsrcver.
 	*** The minimum supported kernel version is $ZFS_META_KVER_MIN.
+		])
+	])
+
+	AC_ARG_ENABLE([linux-experimental],
+		AS_HELP_STRING([--enable-linux-experimental],
+		[Allow building against some unsupported kernel versions]))
+
+	AX_COMPARE_VERSION([$kernsrcver], [ge], [$ZFS_META_KVER_MAX], [
+		AX_COMPARE_VERSION([$kernsrcver], [eq2], [$ZFS_META_KVER_MAX], [
+			kern_max_version_ok=yes
+		], [
+			kern_max_version_ok=no
+		])
+	], [
+		kern_max_version_ok=yes
+	])
+
+	AS_IF([test "x$kern_max_version_ok" != "xyes"], [
+		AS_IF([test "x$enable_linux_experimental" == "xyes"], [
+			AC_DEFINE(HAVE_LINUX_EXPERIMENTAL, 1,
+			    [building against unsupported kernel version])
+		], [
+			AC_MSG_ERROR([
+	*** Cannot build against kernel version $kernsrcver.
+	*** The maximum supported kernel version is $ZFS_META_KVER_MAX.
+			])
 		])
 	])
 
@@ -435,6 +463,30 @@ AC_DEFUN([ZFS_AC_KERNEL], [
 	AC_SUBST(LINUX)
 	AC_SUBST(LINUX_OBJ)
 	AC_SUBST(LINUX_VERSION)
+])
+
+AC_DEFUN([ZFS_AC_KERNEL_VERSION_WARNING], [
+	AS_IF([test "x$enable_linux_experimental" = "xyes" && \
+	    test "x$kern_max_version_ok" != "xyes"], [
+		AC_MSG_WARN([
+
+	You are building OpenZFS against Linux version $kernsrcver.
+
+	This combination is considered EXPERIMENTAL by the OpenZFS project.
+	Even if it appears to build and run correctly, there may be bugs that
+	can cause SERIOUS DATA LOSS.
+
+	YOU HAVE BEEN WARNED!
+
+	If you choose to continue, we'd appreciate if you could report your
+	results on the OpenZFS issue tracker at:
+
+	    https://github.com/openzfs/zfs/issues/new
+
+	Your feedback will help us prepare a new OpenZFS release that supports
+	this version of Linux.
+		])
+	])
 ])
 
 dnl #
@@ -629,11 +681,16 @@ AC_DEFUN([ZFS_LINUX_COMPILE], [
 		building kernel modules])
 	AC_ARG_VAR([KERNEL_LLVM], [Binary option to
 		build kernel modules with LLVM/CLANG toolchain])
+	AC_ARG_VAR([KERNEL_CROSS_COMPILE], [Cross compile prefix
+		for kernel module builds])
+	AC_ARG_VAR([KERNEL_ARCH], [Architecture to build kernel modules for])
 	AC_TRY_COMMAND([
 	    KBUILD_MODPOST_NOFINAL="$5" KBUILD_MODPOST_WARN="$6"
 	    make modules -k -j$TEST_JOBS ${KERNEL_CC:+CC=$KERNEL_CC}
 	    ${KERNEL_LD:+LD=$KERNEL_LD} ${KERNEL_LLVM:+LLVM=$KERNEL_LLVM}
 	    CONFIG_MODULES=y CFLAGS_MODULE=-DCONFIG_MODULES
+	    ${KERNEL_CROSS_COMPILE:+CROSS_COMPILE=$KERNEL_CROSS_COMPILE}
+	    ${KERNEL_ARCH:+ARCH=$KERNEL_ARCH}
 	    -C $LINUX_OBJ $ARCH_UM M=$PWD/$1 >$1/build.log 2>&1])
 	AS_IF([AC_TRY_COMMAND([$2])], [$3], [$4])
 ])

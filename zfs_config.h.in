@@ -218,8 +218,8 @@
 /* DECLARE_EVENT_CLASS() is available */
 #undef HAVE_DECLARE_EVENT_CLASS
 
-/* dequeue_signal() takes a task argument */
-#undef HAVE_DEQUEUE_SIGNAL_3ARG_TASK
+/* 3-arg dequeue_signal() takes a type argument */
+#undef HAVE_DEQUEUE_SIGNAL_3ARG_TYPE
 
 /* dequeue_signal() takes 4 arguments */
 #undef HAVE_DEQUEUE_SIGNAL_4ARG
@@ -239,7 +239,10 @@
 /* Define to 1 if you have the <dlfcn.h> header file. */
 #undef HAVE_DLFCN_H
 
-/* Define to 1 if you have the 'execvpe' function. */
+/* dops->d_revalidate() takes 4 args */
+#undef HAVE_D_REVALIDATE_4ARGS
+
+/* Define to 1 if you have the `execvpe' function. */
 #undef HAVE_EXECVPE
 
 /* fault_in_iov_iter_readable() is available */
@@ -281,7 +284,7 @@
 /* Define if the GNU gettext() function is already present or preinstalled. */
 #undef HAVE_GETTEXT
 
-/* Define to 1 if you have the 'gettid' function. */
+/* Define to 1 if you have the `gettid' function. */
 #undef HAVE_GETTID
 
 /* iops->get_acl() exists */
@@ -386,20 +389,20 @@
 /* iops->symlink() takes struct user_namespace* */
 #undef HAVE_IOPS_SYMLINK_USERNS
 
-/* iov_iter_get_pages() is available */
-#undef HAVE_IOV_ITER_GET_PAGES
-
 /* iov_iter_get_pages2() is available */
 #undef HAVE_IOV_ITER_GET_PAGES2
 
 /* iov_iter_type() is available */
 #undef HAVE_IOV_ITER_TYPE
 
-/* Define to 1 if you have the 'issetugid' function. */
+/* Define to 1 if you have the `issetugid' function. */
 #undef HAVE_ISSETUGID
 
 /* iter_iov() is available */
 #undef HAVE_ITER_IOV
+
+/* iter_is_ubuf() is available */
+#undef HAVE_ITER_IS_UBUF
 
 /* kernel has kernel_fpu_* functions */
 #undef HAVE_KERNEL_FPU
@@ -458,6 +461,9 @@
 /* Define if you have [uuid] */
 #undef HAVE_LIBUUID
 
+/* building against unsupported kernel version */
+#undef HAVE_LINUX_EXPERIMENTAL
+
 /* makedev() is declared in sys/mkdev.h */
 #undef HAVE_MAKEDEV_IN_MKDEV
 
@@ -467,7 +473,7 @@
 /* Noting that make_request_fn() returns blk_qc_t */
 #undef HAVE_MAKE_REQUEST_FN_RET_QC
 
-/* Define to 1 if you have the 'mlockall' function. */
+/* Define to 1 if you have the `mlockall' function. */
 #undef HAVE_MLOCKALL
 
 /* PG_error flag is available */
@@ -493,6 +499,9 @@
 
 /* Define if host toolchain supports PCLMULQDQ */
 #undef HAVE_PCLMULQDQ
+
+/* pin_user_pages_unlocked() is available */
+#undef HAVE_PIN_USER_PAGES_UNLOCKED
 
 /* proc_handler ctl_table arg is const */
 #undef HAVE_PROC_HANDLER_CTL_TABLE_CONST
@@ -587,19 +596,16 @@
 /* Define to 1 if you have the <stdlib.h> header file. */
 #undef HAVE_STDLIB_H
 
-/* Define to 1 if you have the 'strerror_l' function. */
-#undef HAVE_STRERROR_L
-
 /* Define to 1 if you have the <strings.h> header file. */
 #undef HAVE_STRINGS_H
 
 /* Define to 1 if you have the <string.h> header file. */
 #undef HAVE_STRING_H
 
-/* Define to 1 if you have the 'strlcat' function. */
+/* Define to 1 if you have the `strlcat' function. */
 #undef HAVE_STRLCAT
 
-/* Define to 1 if you have the 'strlcpy' function. */
+/* Define to 1 if you have the `strlcpy' function. */
 #undef HAVE_STRLCPY
 
 /* submit_bio is member of struct block_device_operations */
@@ -638,7 +644,7 @@
 /* kernel has totalram_pages() */
 #undef HAVE_TOTALRAM_PAGES_FUNC
 
-/* Define to 1 if you have the 'udev_device_get_is_initialized' function. */
+/* Define to 1 if you have the `udev_device_get_is_initialized' function. */
 #undef HAVE_UDEV_DEVICE_GET_IS_INITIALIZED
 
 /* kernel has __kernel_fpu_* functions */
@@ -659,20 +665,14 @@
 /* fops->dedupe_file_range() is available */
 #undef HAVE_VFS_DEDUPE_FILE_RANGE
 
-/* aops->direct_IO() uses iov_iter without rw */
-#undef HAVE_VFS_DIRECT_IO_ITER
-
-/* aops->direct_IO() uses iov_iter with offset */
-#undef HAVE_VFS_DIRECT_IO_ITER_OFFSET
-
 /* filemap_dirty_folio exists */
 #undef HAVE_VFS_FILEMAP_DIRTY_FOLIO
 
 /* generic_copy_file_range() is available */
 #undef HAVE_VFS_GENERIC_COPY_FILE_RANGE
 
-/* All required iov_iter interfaces are available */
-#undef HAVE_VFS_IOV_ITER
+/* migrate_folio exists */
+#undef HAVE_VFS_MIGRATE_FOLIO
 
 /* address_space_operations->readpages exists */
 #undef HAVE_VFS_READPAGES
@@ -779,7 +779,7 @@
 /* pde_data() is PDE_DATA() */
 #undef SPL_PDE_DATA
 
-/* Define to 1 if all of the C89 standard headers exist (not just the ones
+/* Define to 1 if all of the C90 standard headers exist (not just the ones
    required in a freestanding environment). This macro is provided for
    backward compatibility; new code need not use it. */
 #undef STDC_HEADERS

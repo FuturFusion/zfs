@@ -3,7 +3,7 @@ include $(srcdir)/%D%/include/Makefile.am
 libzpool_la_CFLAGS  = $(AM_CFLAGS) $(KERNEL_CFLAGS) $(LIBRARY_CFLAGS)
 libzpool_la_CFLAGS += $(ZLIB_CFLAGS)
 
-libzpool_la_CPPFLAGS  = $(AM_CPPFLAGS) $(FORCEDEBUG_CPPFLAGS)
+libzpool_la_CPPFLAGS  = $(AM_CPPFLAGS) $(LIBZPOOL_CPPFLAGS)
 libzpool_la_CPPFLAGS += -I$(srcdir)/include/os/@ac_system_l@/zfs
 libzpool_la_CPPFLAGS += -DLIB_ZPOOL_BUILD
 
@@ -46,7 +46,6 @@ nodist_libzpool_la_SOURCES = \
 	module/lua/lvm.c \
 	module/lua/lzio.c \
 	\
-	module/os/linux/zfs/vdev_file.c \
 	module/os/linux/zfs/zio_crypt.c \
 	\
 	module/zcommon/cityhash.c \
@@ -81,9 +80,12 @@ nodist_libzpool_la_SOURCES = \
 	module/zfs/dbuf.c \
 	module/zfs/dbuf_stats.c \
 	module/zfs/ddt.c \
+	module/zfs/ddt_log.c \
+	module/zfs/ddt_stats.c \
 	module/zfs/ddt_zap.c \
 	module/zfs/dmu.c \
 	module/zfs/dmu_diff.c \
+	module/zfs/dmu_direct.c \
 	module/zfs/dmu_object.c \
 	module/zfs/dmu_objset.c \
 	module/zfs/dmu_recv.c \
@@ -140,6 +142,7 @@ nodist_libzpool_la_SOURCES = \
 	module/zfs/vdev.c \
 	module/zfs/vdev_draid.c \
 	module/zfs/vdev_draid_rand.c \
+	module/zfs/vdev_file.c \
 	module/zfs/vdev_indirect.c \
 	module/zfs/vdev_indirect_births.c \
 	module/zfs/vdev_indirect_mapping.c \
@@ -209,7 +212,7 @@ if BUILD_FREEBSD
 libzpool_la_LIBADD += -lgeom
 endif
 
-libzpool_la_LDFLAGS += -version-info 5:0:0
+libzpool_la_LDFLAGS += -version-info 6:0:0
 
 if TARGET_CPU_POWERPC
 module/zfs/libzpool_la-vdev_raidz_math_powerpc_altivec.$(OBJEXT) : CFLAGS += -maltivec

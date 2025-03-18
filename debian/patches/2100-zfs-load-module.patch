@@ -40,7 +40,7 @@ Forwarded: not needed
 +[Service]
 +Type=oneshot
 +RemainAfterExit=yes
-+ExecStart=/sbin/modprobe zfs
++ExecStart=/usr/sbin/modprobe zfs
 +
 +[Install]
 +WantedBy=zfs-mount.service

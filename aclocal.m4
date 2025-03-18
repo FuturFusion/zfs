@@ -14,8 +14,8 @@
 m4_ifndef([AC_CONFIG_MACRO_DIRS], [m4_defun([_AM_CONFIG_MACRO_DIRS], [])m4_defun([AC_CONFIG_MACRO_DIRS], [_AM_CONFIG_MACRO_DIRS($@)])])
 m4_ifndef([AC_AUTOCONF_VERSION],
   [m4_copy([m4_PACKAGE_VERSION], [AC_AUTOCONF_VERSION])])dnl
-m4_if(m4_defn([AC_AUTOCONF_VERSION]), [2.72],,
-[m4_warning([this file was generated for autoconf 2.72.
+m4_if(m4_defn([AC_AUTOCONF_VERSION]), [2.71],,
+[m4_warning([this file was generated for autoconf 2.71.
 You have another version of autoconf.  It may work, but is not guaranteed to.
 If you have problems, you may need to regenerate the build system entirely.
 To do so, use the procedure documented by the package, typically 'autoreconf'.])])
@@ -1595,6 +1595,7 @@ m4_include([config/always-sed.m4])
 m4_include([config/always-shellcheck.m4])
 m4_include([config/always-system.m4])
 m4_include([config/ax_code_coverage.m4])
+m4_include([config/ax_compare_version.m4])
 m4_include([config/ax_count_cpus.m4])
 m4_include([config/ax_python_devel.m4])
 m4_include([config/ax_restore_flags.m4])
@@ -1658,6 +1659,7 @@ m4_include([config/kernel-objtool.m4])
 m4_include([config/kernel-pagemap-folio_wait_bit.m4])
 m4_include([config/kernel-pde-data.m4])
 m4_include([config/kernel-percpu.m4])
+m4_include([config/kernel-pin-user-pages.m4])
 m4_include([config/kernel-proc-operations.m4])
 m4_include([config/kernel-readpages.m4])
 m4_include([config/kernel-reclaim_state.m4])
@@ -1682,11 +1684,11 @@ m4_include([config/kernel-totalram-pages-func.m4])
 m4_include([config/kernel-truncate-setsize.m4])
 m4_include([config/kernel-types.m4])
 m4_include([config/kernel-usleep_range.m4])
-m4_include([config/kernel-vfs-direct_IO.m4])
 m4_include([config/kernel-vfs-file_range.m4])
 m4_include([config/kernel-vfs-filemap_dirty_folio.m4])
 m4_include([config/kernel-vfs-fsync.m4])
 m4_include([config/kernel-vfs-iov_iter.m4])
+m4_include([config/kernel-vfs-migrate_folio.m4])
 m4_include([config/kernel-vfs-read_folio.m4])
 m4_include([config/kernel-vfs-set_page_dirty.m4])
 m4_include([config/kernel-writepage_t.m4])

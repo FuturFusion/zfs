@@ -1,3 +1,10 @@
+zfs-linux (2.3.2-2) unstable; urgency=medium
+
+  * d/patches: backport some fixes from 2.3.3 upstream release
+    (closes: #1106035).
+
+ -- Shengqi Chen <harry@debian.org>  Sun, 29 Jun 2025 21:54:37 +0800
+
 zfs-linux (2.3.2-1) unstable; urgency=medium
 
   * New upstream version 2.3.2 (closes: #1104418).

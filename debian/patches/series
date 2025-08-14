@@ -22,3 +22,9 @@ ubuntu/zfs-mount-container-start.patch
 fix-pyzfs-version.patch
 BUILD_EXCLUSIVE_KERNEL_MIN.patch
 #bump-Linux-Minimum.patch
+upstream/0001-Fix-2-bugs-in-non-raw-send-with-encryption.patch
+upstream/0002-ARC-Avoid-overflows-in-arc_evict_adj.patch
+upstream/0003-Sort-the-blocking-snapshots-list.patch
+upstream/0004-Prefer-embedded-blocks-to-dedup.patch
+upstream/0005-Add-more-descriptive-destroy-error-message.patch
+upstream/0006-Export-correct-symbols-for-Lustre-Direct-IO.patch

@@ -1,0 +1,120 @@
+From a97fba427bd45b9e332a876aa51a92700ae1443a Mon Sep 17 00:00:00 2001
+From: Andriy Tkachuk <andriy.tkachuk@seagate.com>
+Date: Thu, 26 Feb 2026 19:18:02 +0000
+Subject: [PATCH] Fix deadlock on dmu_tx_assign() from vdev_rebuild()
+
+vdev_rebuild() is always called with spa_config_lock held in
+RW_WRITER mode. However, when it tries to call dmu_tx_assign()
+the latter may hang on dmu_tx_wait() waiting for available txg.
+But that available txg may not happen because txg_sync takes
+spa_config_lock in order to process the current txg. So we have
+a deadlock case here:
+
+ - dmu_tx_assign() waits for txg holding spa_config_lock;
+ - txg_sync waits for spa_config_lock not progressing with txg.
+
+Here are the stacks:
+
+    __schedule+0x24e/0x590
+    schedule+0x69/0x110
+    cv_wait_common+0xf8/0x130 [spl]
+    __cv_wait+0x15/0x20 [spl]
+    dmu_tx_wait+0x8e/0x1e0 [zfs]
+    dmu_tx_assign+0x49/0x80 [zfs]
+    vdev_rebuild_initiate+0x39/0xc0 [zfs]
+    vdev_rebuild+0x84/0x90 [zfs]
+    spa_vdev_attach+0x305/0x680 [zfs]
+    zfs_ioc_vdev_attach+0xc7/0xe0 [zfs]
+
+    cv_wait_common+0xf8/0x130 [spl]
+    __cv_wait+0x15/0x20 [spl]
+    spa_config_enter+0xf9/0x120 [zfs]
+    spa_sync+0x6d/0x5b0 [zfs]
+    txg_sync_thread+0x266/0x2f0 [zfs]
+
+The solution is to pass txg returned by spa_vdev_enter(spa)
+at the top of spa_vdev_attach() to vdev_rebuild() and call
+dmu_tx_create_assigned(txg) which doesn't wait for txg.
+
+Reviewed-by: Brian Behlendorf <behlendorf1@llnl.gov>
+Reviewed-by: Akash B <akash-b@hpe.com>
+Reviewed-by: Alek Pinchuk <apinchuk@axcient.com>
+Signed-off-by: Andriy Tkachuk <andriy.tkachuk@seagate.com>
+Closes #18210
+Closes #18258
+---
+ include/sys/vdev_rebuild.h | 2 +-
+ module/zfs/spa.c           | 2 +-
+ module/zfs/vdev_rebuild.c  | 9 ++++-----
+ 3 files changed, 6 insertions(+), 7 deletions(-)
+
+diff --git a/include/sys/vdev_rebuild.h b/include/sys/vdev_rebuild.h
+index 17ed94dd9..51e669c2c 100644
+--- a/include/sys/vdev_rebuild.h
++++ b/include/sys/vdev_rebuild.h
+@@ -90,7 +90,7 @@ typedef struct vdev_rebuild {
+ boolean_t vdev_rebuild_active(vdev_t *);
+ 
+ int vdev_rebuild_load(vdev_t *);
+-void vdev_rebuild(vdev_t *);
++void vdev_rebuild(vdev_t *, uint64_t);
+ void vdev_rebuild_stop_wait(vdev_t *);
+ void vdev_rebuild_stop_all(spa_t *);
+ void vdev_rebuild_restart(spa_t *);
+diff --git a/module/zfs/spa.c b/module/zfs/spa.c
+index 4967ff288..ec0d5dae7 100644
+--- a/module/zfs/spa.c
++++ b/module/zfs/spa.c
+@@ -8306,7 +8306,7 @@ spa_vdev_attach(spa_t *spa, uint64_t guid, nvlist_t *nvroot, int replacing,
+ 		if (rebuild) {
+ 			newvd->vdev_rebuild_txg = txg;
+ 
+-			vdev_rebuild(tvd);
++			vdev_rebuild(tvd, txg);
+ 		} else {
+ 			newvd->vdev_resilver_txg = txg;
+ 
+diff --git a/module/zfs/vdev_rebuild.c b/module/zfs/vdev_rebuild.c
+index 0ab0a7565..c40abfbbf 100644
+--- a/module/zfs/vdev_rebuild.c
++++ b/module/zfs/vdev_rebuild.c
+@@ -278,7 +278,7 @@ vdev_rebuild_log_notify(spa_t *spa, vdev_t *vd, const char *name)
+  * active for the duration of the rebuild, then revert to the enabled state.
+  */
+ static void
+-vdev_rebuild_initiate(vdev_t *vd)
++vdev_rebuild_initiate(vdev_t *vd, uint64_t txg)
+ {
+ 	spa_t *spa = vd->vdev_spa;
+ 
+@@ -286,8 +286,7 @@ vdev_rebuild_initiate(vdev_t *vd)
+ 	ASSERT(MUTEX_HELD(&vd->vdev_rebuild_lock));
+ 	ASSERT(!vd->vdev_rebuilding);
+ 
+-	dmu_tx_t *tx = dmu_tx_create_dd(spa_get_dsl(spa)->dp_mos_dir);
+-	VERIFY0(dmu_tx_assign(tx, DMU_TX_WAIT));
++	dmu_tx_t *tx = dmu_tx_create_assigned(spa_get_dsl(spa), txg);
+ 
+ 	vd->vdev_rebuilding = B_TRUE;
+ 
+@@ -1015,7 +1014,7 @@ vdev_rebuild_active(vdev_t *vd)
+  * top-level vdev is currently actively rebuilding.
+  */
+ void
+-vdev_rebuild(vdev_t *vd)
++vdev_rebuild(vdev_t *vd, uint64_t txg)
+ {
+ 	vdev_rebuild_t *vr = &vd->vdev_rebuild_config;
+ 	vdev_rebuild_phys_t *vrp __maybe_unused = &vr->vr_rebuild_phys;
+@@ -1039,7 +1038,7 @@ vdev_rebuild(vdev_t *vd)
+ 		if (!vd->vdev_rebuild_reset_wanted)
+ 			vd->vdev_rebuild_reset_wanted = B_TRUE;
+ 	} else {
+-		vdev_rebuild_initiate(vd);
++		vdev_rebuild_initiate(vd, txg);
+ 	}
+ 	mutex_exit(&vd->vdev_rebuild_lock);
+ }
+-- 
+2.47.3
+

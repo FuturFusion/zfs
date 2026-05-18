@@ -1,0 +1,271 @@
+From dceca0d4a36343c9e80a218feb16018ddbc31c0b Mon Sep 17 00:00:00 2001
+From: Gary Guo <gary@garyguo.net>
+Date: Wed, 15 Apr 2026 22:51:53 +0100
+Subject: [PATCH] Fix read corruption after block clone after truncate
+
+When copy_file_range overwrites a recent truncation, subsequent reads
+can incorrectly determine that it is read hole instead of reading the
+cloned blocks.
+
+This can happen when the following conditions are met:
+- Truncate adds blkid to dn_free_ranges
+- A new TXG is created
+- copy_file_range calls dmu_brt_clone which override the block pointer
+  and set DB_NOFILL
+- Subsequent read, given DB_NOFILL, hits dbuf_read_impl and
+  dbuf_read_hole
+- dbuf_read_hole calls dnode_block_freed, which returns TRUE because the
+  truncated blkids are still in dn_free_ranges
+
+This will not happen if the clone and truncate are in the same TXG,
+because the block clone would update the current TXG's dn_free_ranges,
+which is why this bug only triggers under high IO load (such as
+compilation).
+
+Fix this by skipping the dnode_block_freed call if the block is
+overridden. The fix shouldn't cause an issue when the cloned block is
+subsequently freed in later TXGs, as dbuf_undirty would remove the
+override.
+
+This requires a dedicated test program as it is much harder to trigger
+with scripts (this needs to generate a lot of I/O in short period of
+time for the bug to trigger reliably).
+
+Assisted-by: Gemini:gemini-3.1-pro
+Reviewed-by: Brian Behlendorf <behlendorf1@llnl.gov>
+Reviewed-by: Tony Hutter <hutter2@llnl.gov>
+Signed-off-by: Gary Guo <gary@kernel.org>
+Closes #18412
+Closes #18421
+---
+ module/zfs/dbuf.c                             |   6 +-
+ tests/runfiles/common.run                     |   3 +-
+ tests/test-runner/bin/zts-report.py.in        |   1 +
+ tests/zfs-tests/cmd/.gitignore                |   1 +
+ tests/zfs-tests/cmd/Makefile.am               |   2 +
+ tests/zfs-tests/cmd/clone_after_trunc.c       | 117 ++++++++++++++++++
+ tests/zfs-tests/include/commands.cfg          |   1 +
+ tests/zfs-tests/tests/Makefile.am             |   1 +
+ .../block_cloning_after_trunc.ksh             |  31 +++++
+ 9 files changed, 161 insertions(+), 2 deletions(-)
+ create mode 100644 tests/zfs-tests/cmd/clone_after_trunc.c
+ create mode 100755 tests/zfs-tests/tests/functional/block_cloning/block_cloning_after_trunc.ksh
+
+diff --git a/module/zfs/dbuf.c b/module/zfs/dbuf.c
+index 63f801c59..b15f0f8ac 100644
+--- a/module/zfs/dbuf.c
++++ b/module/zfs/dbuf.c
+@@ -1507,8 +1507,12 @@ dbuf_read_hole(dmu_buf_impl_t *db, dnode_t *dn, blkptr_t *bp)
+ 	 * Recheck BP_IS_HOLE() after dnode_block_freed() in case dnode_sync()
+ 	 * processes the delete record and clears the bp while we are waiting
+ 	 * for the dn_mtx (resulting in a "no" from block_freed).
++	 *
++	 * If bp != db->db_blkptr, it means that it was overridden (by a block
++	 * clone or direct I/O write). We cannot rely on dnode_block_freed as
++	 * the range can be freed in an earlier TXG but overridden in later.
+ 	 */
+-	if (!is_hole && db->db_level == 0)
++	if (!is_hole && db->db_level == 0 && bp == db->db_blkptr)
+ 		is_hole = dnode_block_freed(dn, db->db_blkid) || BP_IS_HOLE(bp);
+ 
+ 	if (is_hole) {
+diff --git a/tests/test-runner/bin/zts-report.py.in b/tests/test-runner/bin/zts-report.py.in
+index 5bb259b72..6b97e2259 100755
+--- a/tests/test-runner/bin/zts-report.py.in
++++ b/tests/test-runner/bin/zts-report.py.in
+@@ -321,6 +321,7 @@ elif sys.platform.startswith('linux'):
+         'bclone/bclone_samefs_data': ['SKIP', cfr_reason],
+         'bclone/bclone_samefs_embedded': ['SKIP', cfr_reason],
+         'bclone/bclone_samefs_hole': ['SKIP', cfr_reason],
++        'block_cloning/block_cloning_after_trunc': ['SKIP', cfr_reason],
+         'block_cloning/block_cloning_clone_mmap_cached': ['SKIP', cfr_reason],
+         'block_cloning/block_cloning_clone_mmap_write':
+             ['SKIP', cfr_reason],
+diff --git a/tests/zfs-tests/cmd/Makefile.am b/tests/zfs-tests/cmd/Makefile.am
+index 070c86ad5..429864296 100644
+--- a/tests/zfs-tests/cmd/Makefile.am
++++ b/tests/zfs-tests/cmd/Makefile.am
+@@ -35,6 +35,8 @@ scripts_zfs_tests_bin_PROGRAMS += %D%/crypto_test
+ %C%_crypto_test_SOURCES = %D%/crypto_test.c
+ %C%_crypto_test_LDADD = libzpool.la
+ 
++scripts_zfs_tests_bin_PROGRAMS += %D%/clone_after_trunc
++%C%_clone_after_trunc_LDADD = -lpthread
+ 
+ if WANT_DEVNAME2DEVID
+ scripts_zfs_tests_bin_PROGRAMS += %D%/devname2devid
+diff --git a/tests/zfs-tests/cmd/clone_after_trunc.c b/tests/zfs-tests/cmd/clone_after_trunc.c
+new file mode 100644
+index 000000000..631432928
+--- /dev/null
++++ b/tests/zfs-tests/cmd/clone_after_trunc.c
+@@ -0,0 +1,117 @@
++// SPDX-License-Identifier: CDDL-1.0
++
++#include <errno.h>
++#include <fcntl.h>
++#include <limits.h>
++#include <pthread.h>
++#include <string.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <unistd.h>
++#include <sys/stat.h>
++
++#if defined(_GNU_SOURCE) && defined(__linux__)
++_Static_assert(sizeof (loff_t) == sizeof (off_t),
++	"loff_t and off_t must be the same size");
++#endif
++
++ssize_t
++copy_file_range(int, off_t *, int, off_t *, size_t, unsigned int)
++    __attribute__((weak));
++
++#define	FILE_SIZE	(1024 * 1024)
++#define	RECORD_SIZE	(128 * 1024)
++#define	NUM_THREADS	64
++
++const char *dir;
++volatile int failed;
++
++static void *
++run_test(void *arg)
++{
++	int thread_id = (int)(long)arg;
++
++	char src_path[PATH_MAX], dst_path[PATH_MAX];
++	snprintf(src_path, PATH_MAX, "%s/src-%d", dir, thread_id);
++	snprintf(dst_path, PATH_MAX, "%s/dst-%d", dir, thread_id);
++
++	unsigned char *write_buf = malloc(FILE_SIZE);
++	unsigned char *read_buf = malloc(FILE_SIZE);
++
++	// Write out expected data.
++	memset(write_buf, 0xAA, FILE_SIZE);
++	int src = open(src_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
++	if (write(src, write_buf, FILE_SIZE) != FILE_SIZE)
++		perror("write");
++	close(src);
++
++	// Create destination file so we exercise O_TRUNC.
++	int dst = open(dst_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
++	if (write(dst, write_buf, FILE_SIZE) != FILE_SIZE)
++		perror("write");
++	fsync(dst);
++	close(dst);
++
++	// Open file with O_TRUNC and perform copy.
++	src = open(src_path, O_RDONLY);
++	dst = open(dst_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
++
++	off_t off_in = 0, off_out = 0;
++	ssize_t ret =
++	    copy_file_range(src, &off_in, dst, &off_out, FILE_SIZE, 0);
++	if (ret != FILE_SIZE)
++		perror("copy_file_range");
++	close(src);
++	close(dst);
++
++	// Read back
++	dst = open(dst_path, O_RDONLY);
++	if (read(dst, read_buf, FILE_SIZE) != FILE_SIZE)
++		perror("read");
++	close(dst);
++
++	// Bug check
++	if (memcmp(write_buf, read_buf, FILE_SIZE) != 0) {
++		failed = 1;
++		fprintf(stderr, "[%d]: FAIL\n", thread_id);
++
++		int all_zeros = 1;
++		for (int i = 0; i < RECORD_SIZE; i++) {
++			if (read_buf[i] != 0) {
++				all_zeros = 0;
++				break;
++			}
++		}
++
++		if (all_zeros) {
++			fprintf(stderr, "[%d]: ALL ZERO\n", thread_id);
++		}
++	}
++
++	unlink(src_path);
++	unlink(dst_path);
++	free(write_buf);
++	free(read_buf);
++	return (NULL);
++}
++
++int
++main(int argc, const char **argv)
++{
++	if (argc < 2) {
++		fprintf(stderr, "usage: %s <dir>\n", argv[0]);
++		return (1);
++	}
++	dir = argv[1];
++
++	pthread_t threads[NUM_THREADS];
++
++	for (int i = 0; i < NUM_THREADS; i++) {
++		pthread_create(&threads[i], NULL, run_test, (void *)(long)i);
++	}
++	for (int i = 0; i < NUM_THREADS; i++) {
++		pthread_join(threads[i], NULL);
++	}
++
++	return (failed);
++}
+diff --git a/tests/zfs-tests/include/commands.cfg b/tests/zfs-tests/include/commands.cfg
+index 111ec4664..adb8a4638 100644
+--- a/tests/zfs-tests/include/commands.cfg
++++ b/tests/zfs-tests/include/commands.cfg
+@@ -186,6 +186,7 @@ export ZFSTEST_FILES_COMMON='badsend
+     btree_test
+     chg_usr_exec
+     clonefile
++    clone_after_trunc
+     clone_mmap_cached
+     clone_mmap_write
+     crypto_test
+diff --git a/tests/zfs-tests/tests/functional/block_cloning/block_cloning_after_trunc.ksh b/tests/zfs-tests/tests/functional/block_cloning/block_cloning_after_trunc.ksh
+new file mode 100755
+index 000000000..977ec1604
+--- /dev/null
++++ b/tests/zfs-tests/tests/functional/block_cloning/block_cloning_after_trunc.ksh
+@@ -0,0 +1,31 @@
++#!/bin/ksh -p
++# SPDX-License-Identifier: CDDL-1.0
++
++. $STF_SUITE/include/libtest.shlib
++. $STF_SUITE/tests/functional/block_cloning/block_cloning.kshlib
++
++#
++# DESCRIPTION:
++#	When a block is truncated and then cloned to, a read data corruption can occur.
++#	This is a regression test for #18412.
++#
++
++verify_runnable "global"
++
++claim="No read data corruption when cloning blocks after a truncate"
++
++function cleanup
++{
++	datasetexists $TESTPOOL && destroy_pool $TESTPOOL
++}
++
++log_onexit cleanup
++
++log_must zpool create -o feature@block_cloning=enabled $TESTPOOL $DISKS
++
++# Run for a few times to increase the likelihood of bug triggering.
++for i in {0..50}; do
++	log_must clone_after_trunc /$TESTPOOL/
++done
++
++log_pass $claim
+-- 
+2.47.3
+

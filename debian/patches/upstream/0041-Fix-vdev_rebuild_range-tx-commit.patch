@@ -1,0 +1,42 @@
+From b652eb69e0e920e6508fd8acaf018d9eb37266f5 Mon Sep 17 00:00:00 2001
+From: Brian Behlendorf <behlendorf1@llnl.gov>
+Date: Tue, 3 Mar 2026 09:05:34 -0800
+Subject: [PATCH] Fix vdev_rebuild_range() tx commit
+
+The spa_sync thread waits on ->spa_txg_zio and will set ZIO_WAIT_DONE
+before running the sync tasks.  The dmu_tx_commit() call must be done
+after we add the child zio to the ->spa_txg_zio parent otherwise its
+possible the child is added after txg_sync has waited.
+
+Reviewed-by: Alexander Motin <alexander.motin@TrueNAS.com>
+Signed-off-by: Brian Behlendorf <behlendorf1@llnl.gov>
+Closes #18276
+---
+ module/zfs/vdev_rebuild.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/module/zfs/vdev_rebuild.c b/module/zfs/vdev_rebuild.c
+index b5496f481..c4525f100 100644
+--- a/module/zfs/vdev_rebuild.c
++++ b/module/zfs/vdev_rebuild.c
+@@ -617,7 +617,6 @@ vdev_rebuild_range(vdev_rebuild_t *vr, uint64_t start, uint64_t size)
+ 		return (SET_ERROR(EINTR));
+ 	}
+ 	mutex_exit(&vd->vdev_rebuild_lock);
+-	dmu_tx_commit(tx);
+ 
+ 	vr->vr_scan_offset[txg & TXG_MASK] = start + size;
+ 	vr->vr_pass_bytes_issued += size;
+@@ -627,6 +626,9 @@ vdev_rebuild_range(vdev_rebuild_t *vr, uint64_t start, uint64_t size)
+ 	    abd_alloc(psize, B_FALSE), psize, vdev_rebuild_cb, vr,
+ 	    ZIO_PRIORITY_REBUILD, ZIO_FLAG_RAW | ZIO_FLAG_CANFAIL |
+ 	    ZIO_FLAG_RESILVER, NULL));
++	/* vdev_rebuild_cb releases SCL_STATE_ALL */
++
++	dmu_tx_commit(tx);
+ 
+ 	return (0);
+ }
+-- 
+2.47.3
+

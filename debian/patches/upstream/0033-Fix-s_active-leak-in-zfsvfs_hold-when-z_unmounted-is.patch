@@ -1,0 +1,41 @@
+From a9358748c74334b2763ca823256f804bc35f11b1 Mon Sep 17 00:00:00 2001
+From: mischivus <1205832+mischivus@users.noreply.github.com>
+Date: Wed, 11 Mar 2026 21:19:00 -0600
+Subject: [PATCH] Fix s_active leak in zfsvfs_hold() when z_unmounted is true
+
+When getzfsvfs() succeeds (incrementing s_active via
+zfs_vfs_ref()), but z_unmounted is subsequently found to
+be B_TRUE, zfsvfs_hold() returns EBUSY without calling
+zfs_vfs_rele(). This permanently leaks the VFS superblock
+s_active reference, preventing generic_shutdown_super()
+from ever firing, which blocks dmu_objset_disown() and
+makes the pool permanently unexportable (EBUSY).
+
+Add the missing zfs_vfs_rele() call, guarded by
+zfs_vfs_held() to handle the zfsvfs_create() fallback
+path where no VFS reference exists. This matches the
+existing cleanup pattern in zfsvfs_rele().
+
+Reviewed-by: Brian Behlendorf <behlendorf1@llnl.gov>
+Signed-off-by: mischivus <1205832+mischivus@users.noreply.github.com>
+Closes #18309
+Closes #18310
+---
+ module/zfs/zfs_ioctl.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/module/zfs/zfs_ioctl.c b/module/zfs/zfs_ioctl.c
+index 9266c3c28..f3670c8a3 100644
+--- a/module/zfs/zfs_ioctl.c
++++ b/module/zfs/zfs_ioctl.c
+@@ -1424,6 +1424,7 @@ zfsvfs_hold(const char *name, const void *tag, zfsvfs_t **zfvp,
+ 			 * objset from the zfsvfs.
+ 			 */
+ 			ZFS_TEARDOWN_EXIT(*zfvp, tag);
++			zfs_vfs_rele(*zfvp);
+ 			return (SET_ERROR(EBUSY));
+ 		}
+ 	}
+-- 
+2.47.3
+

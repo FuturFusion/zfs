@@ -1,3 +1,45 @@
+zfs-linux (2.3.2-2+deb13u1) UNRELEASED; urgency=medium
+
+  * d/patches: backport targeted fixes from upstream 2.3.3-2.3.7:
+    + Data corruption / on-disk consistency:
+      - 0034: read corruption after block clone over a recent truncate
+      - 0028: dRAID data corruption after disk clear with multiple spares
+      - 0031: dRAID cksum errors after rebuild with degraded disks
+      - 0029: dRAID import failure after disk replacements (smaller disk)
+      - 0030: dRAID seq resilver reads were skipped on degraded vdevs
+      - 0039, 0040, 0041: rare cksum errors after sequential resilver
+      - 0013: range tree off-by-one
+      - 0035: range tree sync race in dnode_sync
+      - 0023: BRT ranges-to-blocks math fix; memory corruption on >64TB
+        vdevs with block cloning
+    + Crash / UAF / panic:
+      - 0037: kernel BUG at mm/usercopy.c on cgroup-OOM during ZFS IO
+      - 0036: UAF in dmu_write_direct_done(), Direct I/O error path
+      - 0024, 0025, 0026: HIGHMEM kmap API violations
+      - 0012: null deref in spa_vdev_remove_cancel_sync()
+      - 0022: feature refcount concurrent-update panic
+    + Deadlocks / leaks / NULL handling:
+      - 0027: deadlock between dmu_tx_assign and vdev_rebuild
+      - 0019: dbuf_evict_one deadlock under memory reclaim / kswapd
+      - 0033: s_active leak preventing pool re-export
+      - 0032: memleak in spa_errlog.c
+      - 0011: dmu_objset_hold_flags rele on error path
+      - 0014: zvol_os null deref on gendisk alloc failure
+    + Other correctness:
+      - 0007: double spares attached to a single failed vdev / ZED
+      - 0008: race between resilver wait and offline/detach
+      - 0009: spa: clear checkpoint information during retry
+      - 0010: icp: use explicit_memset() in gcm_clear_ctx(), info-leak hardening
+      - 0015: vdev: skip faulting disks pending removal (race)
+      - 0016: set spa_final_txg in spa_unload, fixes assertion on
+        reboot/shutdown with DDT
+      - 0017: zfs_log_write: only put the callback on the last itx
+      - 0018: ZED: hotplug device-type misidentification for partitioned spares
+      - 0020: zvol blk-mq: FLUSH/TRIM were sent down the read path
+      - 0021: infinite loops if dmu_prefetch_max set to zero
+
+ -- Aron Xu <aron@debian.org>  Sun, 17 May 2026 05:12:01 +0800
+
 zfs-linux (2.3.2-2) unstable; urgency=medium
 
   * d/patches: backport some fixes from 2.3.3 upstream release

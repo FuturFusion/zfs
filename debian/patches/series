@@ -62,3 +62,4 @@ upstream/0038-Fix-redundant-declaration-of-dsl_pool_t.patch
 upstream/0039-Fix-rare-cksum-errors-after-rebuild.patch
 upstream/0040-Initialize-vr_last_txg-for-rebuild.patch
 upstream/0041-Fix-vdev_rebuild_range-tx-commit.patch
+5000-zap_leaf-bound-chain-walks.patch

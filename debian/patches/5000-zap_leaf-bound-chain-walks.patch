@@ -1,0 +1,161 @@
+From: Aron Xu <aron@debian.org>
+Date: Tue, 20 May 2026 12:00:00 +0800
+Subject: zap_leaf: bound chunk-chain walks in lookup and lookup_closest
+
+zap_leaf_lookup_closest() (readdir / fzap_cursor_retrieve) and
+zap_leaf_lookup() (open / zap_lookup) both walk a per-bucket chunk
+chain by following le->le_next with no termination guard.  If the
+leaf's l_hash[] entry points at a freed chunk, or the chain forms a
+cycle, the loop runs forever and the calling CPU appears as a kernel
+soft lockup.  The ASSERT3U() guards inside the loops are debug-only
+and compile to no-ops in production builds.
+
+Observed in the field on a Debian 6.12.86 host running zfs-linux
+2.3.2.  Two unrelated processes (updatedb.plocate, claude) wedged on
+the same leaf object (matching kernel pointers in R14/RDI) at the same
+chunk index across watchdog samples taken seconds apart, with stack:
+
+    zap_leaf_lookup_closest+0x9X..0x12X
+    fzap_cursor_retrieve+0x197
+    zap_cursor_retrieve+0x216
+    zfs_readdir+0x219
+    zpl_iterate+0x53
+    __x64_sys_getdents64
+
+After installing the readdir-side guard, the warning emitted on the
+corrupted leaf was:
+
+    ZAP leaf blkid=162: chunk 0 has type 253 (expected 252); pool may
+    be corrupt
+
+i.e. l_hash[lh] of leaf 162 was pointing at chunk 0, but chunk 0 was
+on the freelist (ZAP_CHUNK_FREE).  The block's on-disk checksum is
+valid, scrub finds no errors -- the corruption is logical and lives
+inside an encrypted leaf whose MAC matches.  Two distinct directories
+in the same dataset exhibit the same pattern: a 10.6MB ZAP that has
+been static since dataset creation (all 647 leaves at low txg) and a
+4.2MB ZAP that has been rewritten recently (all 257 leaves at high
+txg) -- so the responsible write-path defect has reproduced more than
+once across the dataset's life.  Because the bad leaf is reachable
+from open() as well as readdir(), guarding only the latter still
+allowed lookup to hang.
+
+Harden both walks identically by:
+ - counting visited chunks; if the count reaches ZAP_LEAF_NUMCHUNKS(l)
+   without hitting CHAIN_END we must be cycling,
+ - validating that each chunk index is in range before dereferencing,
+ - validating that le_type == ZAP_CHUNK_ENTRY before use.
+
+On any of these, log via cmn_err(CE_WARN) with the leaf blkid and
+return EIO.  Callers already propagate non-zero, non-ENOENT errors
+back to userspace, so the affected syscall (getdents64, openat, etc.)
+surfaces EIO instead of wedging the CPU.  This turns a hang into a
+clean error; it does not repair the underlying corruption -- the
+affected directories must be moved aside and recreated.
+
+The bound is correct: a leaf contains at most ZAP_LEAF_NUMCHUNKS(l)
+chunks, so any chain that visits more chunks than that without
+terminating must have revisited at least one chunk.
+
+Downstream defensive change; upstream has no fix across any released
+branch up to and including 2.4.2.  Both functions are unchanged from
+their initial Linux import apart from the file-split refactor in
+8ff64005a.
+
+Forwarded: not-needed
+Author: Aron Xu <aron@debian.org>
+Last-Update: 2026-05-20
+---
+Index: zfs/module/zfs/zap_leaf.c
+===================================================================
+--- zfs.orig/module/zfs/zap_leaf.c
++++ zfs/module/zfs/zap_leaf.c
+@@ -382,14 +382,43 @@ int
+ zap_leaf_lookup(zap_leaf_t *l, zap_name_t *zn, zap_entry_handle_t *zeh)
+ {
+ 	struct zap_leaf_entry *le;
++	uint_t nchunks = ZAP_LEAF_NUMCHUNKS(l);
++	uint_t visited = 0;
+ 
+ 	ASSERT3U(zap_leaf_phys(l)->l_hdr.lh_magic, ==, ZAP_LEAF_MAGIC);
+ 
+ 	for (uint16_t *chunkp = LEAF_HASH_ENTPTR(l, zn->zn_hash);
+ 	    *chunkp != CHAIN_END; chunkp = &le->le_next) {
+ 		uint16_t chunk = *chunkp;
++		if (chunk >= nchunks) {
++			cmn_err(CE_WARN, "ZAP object=%llu leaf blkid=%llu: "
++			    "chunk index %u out of range (max %u) "
++			    "during lookup; pool may be corrupt",
++			    (u_longlong_t)l->l_dbuf->db_object,
++			    (u_longlong_t)l->l_blkid,
++			    (uint_t)chunk, nchunks);
++			return (SET_ERROR(EIO));
++		}
++		if (visited++ >= nchunks) {
++			cmn_err(CE_WARN, "ZAP object=%llu leaf blkid=%llu: "
++			    "chunk chain cycle detected during lookup; "
++			    "pool may be corrupt",
++			    (u_longlong_t)l->l_dbuf->db_object,
++			    (u_longlong_t)l->l_blkid);
++			return (SET_ERROR(EIO));
++		}
+ 		le = ZAP_LEAF_ENTRY(l, chunk);
+ 
++		if (le->le_type != ZAP_CHUNK_ENTRY) {
++			cmn_err(CE_WARN, "ZAP object=%llu leaf blkid=%llu: "
++			    "chunk %u has type %u (expected %u) "
++			    "during lookup; pool may be corrupt",
++			    (u_longlong_t)l->l_dbuf->db_object,
++			    (u_longlong_t)l->l_blkid, (uint_t)chunk,
++			    (uint_t)le->le_type,
++			    (uint_t)ZAP_CHUNK_ENTRY);
++			return (SET_ERROR(EIO));
++		}
+ 		ASSERT3U(chunk, <, ZAP_LEAF_NUMCHUNKS(l));
+ 		ASSERT3U(le->le_type, ==, ZAP_CHUNK_ENTRY);
+ 
+@@ -429,15 +458,44 @@ zap_leaf_lookup_closest(zap_leaf_t *l,
+ 	uint64_t besth = -1ULL;
+ 	uint32_t bestcd = -1U;
+ 	uint16_t bestlh = ZAP_LEAF_HASH_NUMENTRIES(l)-1;
++	uint_t nchunks = ZAP_LEAF_NUMCHUNKS(l);
+ 	struct zap_leaf_entry *le;
+ 
+ 	ASSERT3U(zap_leaf_phys(l)->l_hdr.lh_magic, ==, ZAP_LEAF_MAGIC);
+ 
+ 	for (uint16_t lh = LEAF_HASH(l, h); lh <= bestlh; lh++) {
++		uint_t visited = 0;
+ 		for (uint16_t chunk = zap_leaf_phys(l)->l_hash[lh];
+ 		    chunk != CHAIN_END; chunk = le->le_next) {
++			if (chunk >= nchunks) {
++				cmn_err(CE_WARN, "ZAP object=%llu leaf blkid=%llu: "
++				    "chunk index %u out of range (max %u) "
++				    "at lh=%u; pool may be corrupt",
++				    (u_longlong_t)l->l_dbuf->db_object,
++				    (u_longlong_t)l->l_blkid,
++				    (uint_t)chunk, nchunks, (uint_t)lh);
++				return (SET_ERROR(EIO));
++			}
++			if (visited++ >= nchunks) {
++				cmn_err(CE_WARN, "ZAP object=%llu leaf blkid=%llu: "
++				    "chunk chain cycle detected at lh=%u; "
++				    "pool may be corrupt",
++				    (u_longlong_t)l->l_dbuf->db_object,
++				    (u_longlong_t)l->l_blkid, (uint_t)lh);
++				return (SET_ERROR(EIO));
++			}
+ 			le = ZAP_LEAF_ENTRY(l, chunk);
+ 
++			if (le->le_type != ZAP_CHUNK_ENTRY) {
++				cmn_err(CE_WARN, "ZAP object=%llu leaf blkid=%llu: "
++				    "chunk %u has type %u (expected %u); "
++				    "pool may be corrupt",
++				    (u_longlong_t)l->l_dbuf->db_object,
++				    (u_longlong_t)l->l_blkid, (uint_t)chunk,
++				    (uint_t)le->le_type,
++				    (uint_t)ZAP_CHUNK_ENTRY);
++				return (SET_ERROR(EIO));
++			}
+ 			ASSERT3U(chunk, <, ZAP_LEAF_NUMCHUNKS(l));
+ 			ASSERT3U(le->le_type, ==, ZAP_CHUNK_ENTRY);
+ 

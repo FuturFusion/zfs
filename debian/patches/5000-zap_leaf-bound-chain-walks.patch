@@ -46,16 +46,28 @@ Harden both walks identically by:
  - validating that each chunk index is in range before dereferencing,
  - validating that le_type == ZAP_CHUNK_ENTRY before use.
 
-On any of these, log via cmn_err(CE_WARN) with the leaf blkid and
-return EIO.  Callers already propagate non-zero, non-ENOENT errors
+On any of these, log via cmn_err(CE_WARN) with the object id, leaf
+blkid and offending chunk / type, then call zap_leaf_dump_verify() to
+emit a full state dump of the leaf (freelist walk, hash-bucket walk,
+per-entry name/value array chain validation, orphan-chunk accounting)
+and return EIO.  Callers already propagate non-zero, non-ENOENT errors
 back to userspace, so the affected syscall (getdents64, openat, etc.)
 surfaces EIO instead of wedging the CPU.  This turns a hang into a
 clean error; it does not repair the underlying corruption -- the
 affected directories must be moved aside and recreated.
 
-The bound is correct: a leaf contains at most ZAP_LEAF_NUMCHUNKS(l)
-chunks, so any chain that visits more chunks than that without
-terminating must have revisited at least one chunk.
+The full leaf dump is added at the request of the openzfs/zfs#18572
+maintainers to disambiguate the failure mode (e.g. stale hash-bucket
+pointer left after a remove vs. double-free producing a freelist
+cycle vs. an entry chain that joins the freelist).  Output volume is
+budgeted (zap_leaf_dump_remaining defaults to 8 dumps per module
+load) so dmesg is not flooded if many lookups hit the same bad
+leaf; the budget is reset by a module reload (i.e. reboot for
+root-pool hosts).
+
+The chain-walk bound is correct: a leaf contains at most
+ZAP_LEAF_NUMCHUNKS(l) chunks, so any chain that visits more chunks
+than that without terminating must have revisited at least one chunk.
 
 Downstream defensive change; upstream has no fix across any released
 branch up to and including 2.4.2.  Both functions are unchanged from
@@ -70,7 +82,282 @@ Index: zfs/module/zfs/zap_leaf.c
 ===================================================================
 --- zfs.orig/module/zfs/zap_leaf.c
 +++ zfs/module/zfs/zap_leaf.c
-@@ -382,14 +382,43 @@ int
+@@ -375,6 +375,274 @@ zap_leaf_array_match(zap_leaf_t *l, zap_
+ }
+ 
+ /*
++ * Diagnostic: dump full leaf state when the bounded-chain-walk guards in
++ * zap_leaf_lookup() / zap_leaf_lookup_closest() detect corruption.
++ *
++ * Walks the freelist, every hash bucket and every entry's name / value
++ * array chain, marking each visited chunk in a 'seen' bitmap, then
++ * reports any orphan chunks (free chunks not on the freelist, or
++ * non-free chunks unreachable from any hash bucket).  Output goes to
++ * the kernel log via cmn_err(); the function returns no value.
++ *
++ * Budgeted by zap_leaf_dump_remaining so a leaf with many corrupt
++ * buckets does not flood dmesg.  Best-effort thread-safety; a small
++ * over-shoot under contention is acceptable for a diagnostic.
++ */
++static int zap_leaf_dump_remaining = 8;
++
++static void
++zap_leaf_dump_verify(zap_leaf_t *l)
++{
++	zap_leaf_phys_t *phys = zap_leaf_phys(l);
++	struct zap_leaf_header *hdr = &phys->l_hdr;
++	uint16_t num_chunks = ZAP_LEAF_NUMCHUNKS(l);
++	uint16_t num_buckets = ZAP_LEAF_HASH_NUMENTRIES(l);
++	uint8_t *seen;
++	uint16_t entry_count = 0;
++	uint16_t array_count = 0;
++	uint16_t free_count = 0;
++	uint16_t orphan_free = 0, orphan_array = 0;
++	uint16_t orphan_entry = 0, orphan_badtype = 0;
++
++	if (zap_leaf_dump_remaining <= 0)
++		return;
++	zap_leaf_dump_remaining--;
++
++	cmn_err(CE_NOTE,
++	    "ZAP object=%llu leaf blkid=%llu bs=%u chunks=%u buckets=%u",
++	    (u_longlong_t)l->l_dbuf->db_object,
++	    (u_longlong_t)l->l_blkid, l->l_bs,
++	    (uint_t)num_chunks, (uint_t)num_buckets);
++	cmn_err(CE_NOTE,
++	    "  l_hdr: magic=0x%x prefix=0x%llx prefix_len=%u flags=0x%x",
++	    hdr->lh_magic, (u_longlong_t)hdr->lh_prefix,
++	    hdr->lh_prefix_len, hdr->lh_flags);
++	cmn_err(CE_NOTE,
++	    "  l_hdr: nfree=%u nentries=%u freelist_head=%u",
++	    hdr->lh_nfree, hdr->lh_nentries, hdr->lh_freelist);
++
++	seen = kmem_zalloc(num_chunks, KM_SLEEP);
++
++	/* Phase A: walk the freelist. */
++	{
++		uint16_t c = hdr->lh_freelist;
++		boolean_t ok = B_TRUE;
++		while (c != CHAIN_END) {
++			if (c >= num_chunks) {
++				cmn_err(CE_WARN,
++				    "  FREELIST: chunk %u >= %u (OOB)",
++				    (uint_t)c, (uint_t)num_chunks);
++				ok = B_FALSE;
++				break;
++			}
++			if (ZAP_LEAF_CHUNK(l, c).l_free.lf_type !=
++			    ZAP_CHUNK_FREE) {
++				cmn_err(CE_WARN,
++				    "  FREELIST: chunk %u type=%u (expected %u)",
++				    (uint_t)c,
++				    (uint_t)ZAP_LEAF_CHUNK(l, c).l_free.lf_type,
++				    (uint_t)ZAP_CHUNK_FREE);
++				ok = B_FALSE;
++				break;
++			}
++			if (seen[c]) {
++				cmn_err(CE_WARN,
++				    "  FREELIST: chunk %u reached twice -- "
++				    "POSSIBLE CYCLE", (uint_t)c);
++				ok = B_FALSE;
++				break;
++			}
++			seen[c] = 1;
++			free_count++;
++			if (free_count > num_chunks) {
++				cmn_err(CE_WARN,
++				    "  FREELIST: walked > %u chunks (truncated)",
++				    (uint_t)num_chunks);
++				ok = B_FALSE;
++				break;
++			}
++			c = ZAP_LEAF_CHUNK(l, c).l_free.lf_next;
++		}
++		cmn_err(ok ? CE_NOTE : CE_WARN,
++		    "  freelist: %u free chunk(s) %s (header says nfree=%u)",
++		    (uint_t)free_count,
++		    free_count == hdr->lh_nfree ? "OK" : "MISMATCH",
++		    (uint_t)hdr->lh_nfree);
++	}
++
++	/*
++	 * Phase B: walk every hash bucket, validate each entry chain and
++	 * each entry's name / value array chains.  Free-list chunks are
++	 * already marked in `seen`; entry and array chunks are marked
++	 * here.  Any chunk left unmarked at the end is an orphan.
++	 */
++	for (uint16_t b = 0; b < num_buckets; b++) {
++		uint16_t c = phys->l_hash[b];
++		boolean_t head_logged = B_FALSE;
++
++		if (c == CHAIN_END)
++			continue;
++
++		if (c >= num_chunks) {
++			cmn_err(CE_WARN,
++			    "  l_hash[%u] = %u (out of range, max %u) -- "
++			    "HEAD CORRUPT", (uint_t)b, (uint_t)c,
++			    (uint_t)num_chunks);
++			continue;
++		}
++		if (ZAP_LEAF_CHUNK(l, c).l_entry.le_type != ZAP_CHUNK_ENTRY) {
++			cmn_err(CE_WARN,
++			    "  l_hash[%u] = %u (type=%u, expected %u) -- "
++			    "HEAD CORRUPT", (uint_t)b, (uint_t)c,
++			    (uint_t)ZAP_LEAF_CHUNK(l, c).l_entry.le_type,
++			    (uint_t)ZAP_CHUNK_ENTRY);
++			head_logged = B_TRUE;
++			/* fall through to attempt chain walk for context */
++		}
++
++		while (c != CHAIN_END) {
++			if (c >= num_chunks) {
++				if (!head_logged)
++					cmn_err(CE_WARN,
++					    "  l_hash[%u] chain: chunk %u >= %u"
++					    " -- LINK OOB",
++					    (uint_t)b, (uint_t)c,
++					    (uint_t)num_chunks);
++				break;
++			}
++			if (ZAP_LEAF_CHUNK(l, c).l_entry.le_type !=
++			    ZAP_CHUNK_ENTRY) {
++				if (!head_logged)
++					cmn_err(CE_WARN,
++					    "  l_hash[%u] chain: chunk %u "
++					    "type=%u -- LINK CORRUPT",
++					    (uint_t)b, (uint_t)c,
++					    (uint_t)ZAP_LEAF_CHUNK(l, c)
++					    .l_entry.le_type);
++				break;
++			}
++			if (seen[c]) {
++				cmn_err(CE_WARN,
++				    "  l_hash[%u] chain: chunk %u reached "
++				    "twice -- POSSIBLE CYCLE", (uint_t)b,
++				    (uint_t)c);
++				break;
++			}
++			seen[c] = 1;
++			entry_count++;
++
++			struct zap_leaf_entry *le = ZAP_LEAF_ENTRY(l, c);
++
++			/* validate name array chain */
++			{
++				uint16_t nc = le->le_name_chunk;
++				uint_t steps = 0;
++				while (nc != CHAIN_END) {
++					if (nc >= num_chunks ||
++					    ZAP_LEAF_CHUNK(l, nc).l_array
++					    .la_type != ZAP_CHUNK_ARRAY) {
++						cmn_err(CE_WARN,
++						    "  ENTRY %u name_chain: "
++						    "chunk %u type=%u "
++						    "(expected ARRAY=%u)",
++						    (uint_t)c, (uint_t)nc,
++						    nc < num_chunks ?
++						    (uint_t)ZAP_LEAF_CHUNK(l,
++						    nc).l_entry.le_type : 0,
++						    (uint_t)ZAP_CHUNK_ARRAY);
++						break;
++					}
++					if (seen[nc])
++						break;
++					seen[nc] = 1;
++					array_count++;
++					if (++steps > num_chunks)
++						break;
++					nc = ZAP_LEAF_CHUNK(l, nc).l_array
++					    .la_next;
++				}
++			}
++
++			/* validate value array chain */
++			{
++				uint16_t vc = le->le_value_chunk;
++				uint_t steps = 0;
++				while (vc != CHAIN_END) {
++					if (vc >= num_chunks ||
++					    ZAP_LEAF_CHUNK(l, vc).l_array
++					    .la_type != ZAP_CHUNK_ARRAY) {
++						cmn_err(CE_WARN,
++						    "  ENTRY %u value_chain: "
++						    "chunk %u type=%u "
++						    "(expected ARRAY=%u)",
++						    (uint_t)c, (uint_t)vc,
++						    vc < num_chunks ?
++						    (uint_t)ZAP_LEAF_CHUNK(l,
++						    vc).l_entry.le_type : 0,
++						    (uint_t)ZAP_CHUNK_ARRAY);
++						break;
++					}
++					if (seen[vc])
++						break;
++					seen[vc] = 1;
++					array_count++;
++					if (++steps > num_chunks)
++						break;
++					vc = ZAP_LEAF_CHUNK(l, vc).l_array
++					    .la_next;
++				}
++			}
++
++			c = le->le_next;
++		}
++	}
++
++	cmn_err(CE_NOTE,
++	    "  entries: %u in hash chains (header says nentries=%u) %s",
++	    (uint_t)entry_count, (uint_t)hdr->lh_nentries,
++	    entry_count == hdr->lh_nentries ? "OK" : "MISMATCH");
++
++	/* Phase C: count chunks not reached by any chain. */
++	for (uint16_t i = 0; i < num_chunks; i++) {
++		if (seen[i])
++			continue;
++		uint8_t t = ZAP_LEAF_CHUNK(l, i).l_entry.le_type;
++		switch (t) {
++		case ZAP_CHUNK_FREE:
++			orphan_free++;
++			break;
++		case ZAP_CHUNK_ARRAY:
++			orphan_array++;
++			break;
++		case ZAP_CHUNK_ENTRY:
++			orphan_entry++;
++			break;
++		default:
++			orphan_badtype++;
++			break;
++		}
++	}
++
++	if (orphan_entry || orphan_array || orphan_badtype || orphan_free) {
++		cmn_err(CE_WARN,
++		    "  UNREACHABLE chunks: entry=%u array=%u badtype=%u "
++		    "free-but-not-on-freelist=%u",
++		    (uint_t)orphan_entry, (uint_t)orphan_array,
++		    (uint_t)orphan_badtype, (uint_t)orphan_free);
++	}
++
++	cmn_err(CE_NOTE,
++	    "  summary: %u total, %u accounted via hash chains "
++	    "(entries=%u arrays=%u), %u on freelist",
++	    (uint_t)num_chunks,
++	    (uint_t)(entry_count + array_count),
++	    (uint_t)entry_count, (uint_t)array_count,
++	    (uint_t)free_count);
++
++	kmem_free(seen, num_chunks);
++}
++
++/*
+  * Routines which manipulate leaf entries.
+  */
+ 
+@@ -382,14 +650,46 @@ int
  zap_leaf_lookup(zap_leaf_t *l, zap_name_t *zn, zap_entry_handle_t *zeh)
  {
  	struct zap_leaf_entry *le;
@@ -89,6 +376,7 @@ Index: zfs/module/zfs/zap_leaf.c
 +			    (u_longlong_t)l->l_dbuf->db_object,
 +			    (u_longlong_t)l->l_blkid,
 +			    (uint_t)chunk, nchunks);
++			zap_leaf_dump_verify(l);
 +			return (SET_ERROR(EIO));
 +		}
 +		if (visited++ >= nchunks) {
@@ -97,6 +385,7 @@ Index: zfs/module/zfs/zap_leaf.c
 +			    "pool may be corrupt",
 +			    (u_longlong_t)l->l_dbuf->db_object,
 +			    (u_longlong_t)l->l_blkid);
++			zap_leaf_dump_verify(l);
 +			return (SET_ERROR(EIO));
 +		}
  		le = ZAP_LEAF_ENTRY(l, chunk);
@@ -109,12 +398,13 @@ Index: zfs/module/zfs/zap_leaf.c
 +			    (u_longlong_t)l->l_blkid, (uint_t)chunk,
 +			    (uint_t)le->le_type,
 +			    (uint_t)ZAP_CHUNK_ENTRY);
++			zap_leaf_dump_verify(l);
 +			return (SET_ERROR(EIO));
 +		}
  		ASSERT3U(chunk, <, ZAP_LEAF_NUMCHUNKS(l));
  		ASSERT3U(le->le_type, ==, ZAP_CHUNK_ENTRY);
  
-@@ -429,15 +458,44 @@ zap_leaf_lookup_closest(zap_leaf_t *l,
+@@ -429,15 +729,47 @@ zap_leaf_lookup_closest(zap_leaf_t *l,
  	uint64_t besth = -1ULL;
  	uint32_t bestcd = -1U;
  	uint16_t bestlh = ZAP_LEAF_HASH_NUMENTRIES(l)-1;
@@ -134,6 +424,7 @@ Index: zfs/module/zfs/zap_leaf.c
 +				    (u_longlong_t)l->l_dbuf->db_object,
 +				    (u_longlong_t)l->l_blkid,
 +				    (uint_t)chunk, nchunks, (uint_t)lh);
++				zap_leaf_dump_verify(l);
 +				return (SET_ERROR(EIO));
 +			}
 +			if (visited++ >= nchunks) {
@@ -142,6 +433,7 @@ Index: zfs/module/zfs/zap_leaf.c
 +				    "pool may be corrupt",
 +				    (u_longlong_t)l->l_dbuf->db_object,
 +				    (u_longlong_t)l->l_blkid, (uint_t)lh);
++				zap_leaf_dump_verify(l);
 +				return (SET_ERROR(EIO));
 +			}
  			le = ZAP_LEAF_ENTRY(l, chunk);
@@ -154,6 +446,7 @@ Index: zfs/module/zfs/zap_leaf.c
 +				    (u_longlong_t)l->l_blkid, (uint_t)chunk,
 +				    (uint_t)le->le_type,
 +				    (uint_t)ZAP_CHUNK_ENTRY);
++				zap_leaf_dump_verify(l);
 +				return (SET_ERROR(EIO));
 +			}
  			ASSERT3U(chunk, <, ZAP_LEAF_NUMCHUNKS(l));

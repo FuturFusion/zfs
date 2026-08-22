@@ -271,7 +271,7 @@ Forwarded: not needed
 +.El
 --- a/man/Makefile.am
 +++ b/man/Makefile.am
-@@ -2,7 +2,6 @@
+@@ -3,7 +3,6 @@ dist_noinst_man_MANS = \
  	%D%/man1/cstyle.1
  
  dist_man_MANS = \
@@ -279,7 +279,7 @@ Forwarded: not needed
  	%D%/man1/raidz_test.1 \
  	%D%/man1/test-runner.1 \
  	%D%/man1/zhack.1 \
-@@ -22,6 +21,7 @@
+@@ -23,6 +22,7 @@ dist_man_MANS = \
  	%D%/man7/zpoolconcepts.7 \
  	%D%/man7/zpoolprops.7 \
  	\

@@ -6,8 +6,8 @@ Author: Dimitri John Ledkov <xnox@ubuntu.com>
 
 --- a/etc/systemd/system/zfs-mount.service.in
 +++ b/etc/systemd/system/zfs-mount.service.in
-@@ -5,6 +5,7 @@
- After=systemd-udev-settle.service
+@@ -4,6 +4,7 @@ Documentation=man:zfs(8)
+ DefaultDependencies=no
  After=zfs-import.target
  After=systemd-remount-fs.service
 +After=zfs-load-module.service

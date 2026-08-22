@@ -1044,10 +1044,12 @@ extern void spa_set_rootblkptr(spa_t *spa, const blkptr_t *bp);
 extern void spa_altroot(spa_t *, char *, size_t);
 extern uint32_t spa_sync_pass(spa_t *spa);
 extern char *spa_name(spa_t *spa);
+extern char *spa_load_name(spa_t *spa);
 extern uint64_t spa_guid(spa_t *spa);
 extern uint64_t spa_load_guid(spa_t *spa);
 extern uint64_t spa_last_synced_txg(spa_t *spa);
 extern uint64_t spa_first_txg(spa_t *spa);
+extern uint64_t spa_open_txg(spa_t *spa);
 extern uint64_t spa_syncing_txg(spa_t *spa);
 extern uint64_t spa_final_dirty_txg(spa_t *spa);
 extern uint64_t spa_version(spa_t *spa);
@@ -1093,9 +1095,9 @@ extern void spa_set_allocator(spa_t *spa, const char *allocator);
 
 /* Miscellaneous support routines */
 extern void spa_load_failed(spa_t *spa, const char *fmt, ...)
-    __attribute__((format(printf, 2, 3)));
+    __attribute__((format(__printf__, 2, 3)));
 extern void spa_load_note(spa_t *spa, const char *fmt, ...)
-    __attribute__((format(printf, 2, 3)));
+    __attribute__((format(__printf__, 2, 3)));
 extern void spa_activate_mos_feature(spa_t *spa, const char *feature,
     dmu_tx_t *tx);
 extern void spa_deactivate_mos_feature(spa_t *spa, const char *feature);

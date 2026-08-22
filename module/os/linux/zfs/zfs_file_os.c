@@ -41,7 +41,8 @@
  * Returns 0 on success underlying error on failure.
  */
 int
-zfs_file_open(const char *path, int flags, int mode, zfs_file_t **fpp)
+zfs_file_open(const char *path, int flags, int mode, cred_t *cr,
+    zfs_file_t **fpp)
 {
 	struct file *filp;
 	int saved_umask;
@@ -52,7 +53,9 @@ zfs_file_open(const char *path, int flags, int mode, zfs_file_t **fpp)
 	if (flags & O_CREAT)
 		saved_umask = xchg(&current->fs->umask, 0);
 
+	const cred_t *oldcr = override_creds(cr);
 	filp = filp_open(path, flags, mode);
+	revert_creds(oldcr);
 
 	if (flags & O_CREAT)
 		(void) xchg(&current->fs->umask, saved_umask);
@@ -115,8 +118,9 @@ zfs_file_write(zfs_file_t *fp, const void *buf, size_t count, ssize_t *resid)
  */
 int
 zfs_file_pwrite(zfs_file_t *fp, const void *buf, size_t count, loff_t off,
-    ssize_t *resid)
+    uint8_t ashift, ssize_t *resid)
 {
+	(void) ashift;
 	ssize_t rc;
 
 	rc  = kernel_write(fp, buf, count, &off);

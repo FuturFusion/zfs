@@ -580,6 +580,7 @@ arc_stats_t arc_stats = {
 	{ "uncached_metadata",		KSTAT_DATA_UINT64 },
 	{ "uncached_evictable_data",	KSTAT_DATA_UINT64 },
 	{ "uncached_evictable_metadata", KSTAT_DATA_UINT64 },
+	{ "l2_ndev",			KSTAT_DATA_UINT64 },
 	{ "l2_hits",			KSTAT_DATA_UINT64 },
 	{ "l2_misses",			KSTAT_DATA_UINT64 },
 	{ "l2_prefetch_asize",		KSTAT_DATA_UINT64 },
@@ -1850,7 +1851,7 @@ arc_hdr_authenticate(arc_buf_hdr_t *hdr, spa_t *spa, uint64_t dsobj)
 
 	if (ret == 0)
 		arc_hdr_clear_flags(hdr, ARC_FLAG_NOAUTH);
-	else if (ret == ENOENT)
+	else if (ret == EACCES)
 		ret = 0;
 
 	if (free_abd)
@@ -7371,6 +7372,7 @@ arc_kstat_update(kstat_t *ksp, int rw)
 	    aggsum_value(&arc_sums.arcstat_dnode_size);
 	as->arcstat_bonus_size.value.ui64 =
 	    wmsum_value(&arc_sums.arcstat_bonus_size);
+	as->arcstat_l2_ndev.value.ui64 = l2arc_ndev;
 	as->arcstat_l2_hits.value.ui64 =
 	    wmsum_value(&arc_sums.arcstat_l2_hits);
 	as->arcstat_l2_misses.value.ui64 =
@@ -11092,9 +11094,15 @@ l2arc_log_blkptr_valid(l2arc_dev_t *dev, const l2arc_log_blkptr_t *lbp)
 	    l2arc_range_check_overlap(dev->l2ad_hand, dev->l2ad_evict, start) ||
 	    l2arc_range_check_overlap(dev->l2ad_hand, dev->l2ad_evict, end);
 
-	return (start >= dev->l2ad_start && end <= dev->l2ad_end &&
-	    asize > 0 && asize <= sizeof (l2arc_log_blk_phys_t) &&
-	    (!evicted || dev->l2ad_first));
+	if (asize == 0 || asize > sizeof (l2arc_log_blk_phys_t) ||
+	    start < dev->l2ad_start || end > dev->l2ad_end)
+		return (B_FALSE);
+
+	/* On a first sweep only the region below the write hand was written. */
+	if (dev->l2ad_first)
+		return (end < dev->l2ad_hand);
+
+	return (!evicted);
 }
 
 /*
@@ -11184,6 +11192,7 @@ EXPORT_SYMBOL(arc_write);
 EXPORT_SYMBOL(arc_read);
 EXPORT_SYMBOL(arc_buf_info);
 EXPORT_SYMBOL(arc_getbuf_func);
+EXPORT_SYMBOL(arc_buf_destroy);
 EXPORT_SYMBOL(arc_add_prune_callback);
 EXPORT_SYMBOL(arc_remove_prune_callback);
 

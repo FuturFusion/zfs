@@ -62,10 +62,11 @@ CFLAGS+= -DZFS_DEBUG -g
 CFLAGS += -DNDEBUG
 .endif
 
-.if defined(WITH_VFS_DEBUG) && ${WITH_VFS_DEBUG} == "true"
-# kernel must also be built with this option for this to work
-CFLAGS+= -DDEBUG_VFS_LOCKS
+.for _SAN in KASAN KMSAN KUBSAN
+.if defined(WITH_${_SAN}) && ${WITH_${_SAN}} == "true"
+KERN_OPTS_EXTRA+= ${_SAN}
 .endif
+.endfor
 
 .if defined(WITH_GCOV) && ${WITH_GCOV} == "true"
 CFLAGS+=	 -fprofile-arcs -ftest-coverage

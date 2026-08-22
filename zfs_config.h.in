@@ -22,6 +22,9 @@
 /* Define if you have [rt] */
 #undef HAVE_AIO_H
 
+/* Define if your assembler supports .cfi_negate_ra_state. */
+#undef HAVE_AS_CFI_PSEUDO_OP
+
 /* Define if host toolchain supports AVX */
 #undef HAVE_AVX
 
@@ -187,6 +190,9 @@
 /* backing_dev_info is available through queue gendisk */
 #undef HAVE_BLK_QUEUE_DISK_BDI
 
+/* blk_queue_rot() is available */
+#undef HAVE_BLK_QUEUE_ROT
+
 /* blk_queue_secure_erase() is available */
 #undef HAVE_BLK_QUEUE_SECURE_ERASE
 
@@ -196,11 +202,23 @@
 /* BLK_STS_RESV_CONFLICT is defined */
 #undef HAVE_BLK_STS_RESV_CONFLICT
 
+/* Define if getgeo() in block_device_operations takes struct gendisk * as its
+   first arg */
+#undef HAVE_BLOCK_DEVICE_OPERATIONS_GETGEO_GENDISK
+
 /* Define if release() in block_device_operations takes 1 arg */
 #undef HAVE_BLOCK_DEVICE_OPERATIONS_RELEASE_1ARG
 
 /* Define if revalidate_disk() in block_device_operations */
 #undef HAVE_BLOCK_DEVICE_OPERATIONS_REVALIDATE_DISK
+
+/* Define to 1 if you have the Mac OS X function
+   CFLocaleCopyPreferredLanguages in the CoreFoundation framework. */
+#undef HAVE_CFLOCALECOPYPREFERREDLANGUAGES
+
+/* Define to 1 if you have the Mac OS X function CFPreferencesCopyAppValue in
+   the CoreFoundation framework. */
+#undef HAVE_CFPREFERENCESCOPYAPPVALUE
 
 /* check_disk_change() exists */
 #undef HAVE_CHECK_DISK_CHANGE
@@ -217,6 +235,9 @@
 
 /* DECLARE_EVENT_CLASS() is available */
 #undef HAVE_DECLARE_EVENT_CLASS
+
+/* dentry aliases are in d_u member */
+#undef HAVE_DENTRY_D_U_ALIASES
 
 /* 3-arg dequeue_signal() takes a type argument */
 #undef HAVE_DEQUEUE_SIGNAL_3ARG_TYPE
@@ -242,11 +263,17 @@
 /* dops->d_revalidate() takes 4 args */
 #undef HAVE_D_REVALIDATE_4ARGS
 
-/* Define to 1 if you have the 'execvpe' function. */
+/* Define if d_set_d_op() is available */
+#undef HAVE_D_SET_D_OP
+
+/* Define to 1 if you have the `execvpe' function. */
 #undef HAVE_EXECVPE
 
 /* fault_in_iov_iter_readable() is available */
 #undef HAVE_FAULT_IN_IOV_ITER_READABLE
+
+/* linux/filelock.h exists */
+#undef HAVE_FILELOCK_HEADER
 
 /* file->f_version exists */
 #undef HAVE_FILE_F_VERSION
@@ -254,11 +281,26 @@
 /* flush_dcache_page() is GPL-only */
 #undef HAVE_FLUSH_DCACHE_PAGE_GPL_ONLY
 
+/* use __flush_workqueue() to flush delay workqueue */
+#undef HAVE_FLUSH_DELAY_WORKQUEUE_INTERNAL
+
+/* use system_delay_wq for delay workqueue */
+#undef HAVE_FLUSH_DELAY_WORKQUEUE_PERCPU
+
+/* follow_down() takes a flags parameter */
+#undef HAVE_FOLLOW_DOWN_FLAGS
+
 /* Define if compiler supports -Wformat-overflow */
 #undef HAVE_FORMAT_OVERFLOW
 
 /* fsync_bdev() is declared in include/blkdev.h */
 #undef HAVE_FSYNC_BDEV
+
+/* fs_context exists */
+#undef HAVE_FS_CONTEXT
+
+/* fs_parse() takes fs_parameter_spec directly */
+#undef HAVE_FS_PARSE_TAKES_SPEC
 
 /* yes */
 #undef HAVE_GENERIC_FADVISE
@@ -284,7 +326,7 @@
 /* Define if the GNU gettext() function is already present or preinstalled. */
 #undef HAVE_GETTEXT
 
-/* Define to 1 if you have the 'gettid' function. */
+/* Define to 1 if you have the `gettid' function. */
 #undef HAVE_GETTID
 
 /* iops->get_acl() exists */
@@ -308,17 +350,26 @@
 /* iops->setattr() takes struct mnt_idmap* */
 #undef HAVE_IDMAP_IOPS_SETATTR
 
+/* id mapping mechanism is mnt_idmap */
+#undef HAVE_IDMAP_MNTIDMAP
+
 /* APIs for idmapped mount are present */
 #undef HAVE_IDMAP_MNT_API
 
 /* mnt_idmap does not have user_namespace */
 #undef HAVE_IDMAP_NO_USERNS
 
+/* id mapping mechanism is user_namespace */
+#undef HAVE_IDMAP_USERNS
+
 /* Define if compiler supports -Wimplicit-fallthrough */
 #undef HAVE_IMPLICIT_FALLTHROUGH
 
 /* Define if compiler supports -Winfinite-recursion */
 #undef HAVE_INFINITE_RECURSION
+
+/* inode_generic_drop() exists */
+#undef HAVE_INODE_GENERIC_DROP
 
 /* inode_get_atime() exists in linux/fs.h */
 #undef HAVE_INODE_GET_ATIME
@@ -346,6 +397,9 @@
 
 /* inode_set_mtime_to_ts() exists in linux/fs.h */
 #undef HAVE_INODE_SET_MTIME_TO_TS
+
+/* inode_state_read_once() exists */
+#undef HAVE_INODE_STATE_READ_ONCE
 
 /* timestamp_truncate() exists */
 #undef HAVE_INODE_TIMESTAMP_TRUNCATE
@@ -398,7 +452,7 @@
 /* iov_iter_type() is available */
 #undef HAVE_IOV_ITER_TYPE
 
-/* Define to 1 if you have the 'issetugid' function. */
+/* Define to 1 if you have the `issetugid' function. */
 #undef HAVE_ISSETUGID
 
 /* iter_iov() is available */
@@ -406,6 +460,9 @@
 
 /* iter_is_ubuf() is available */
 #undef HAVE_ITER_IS_UBUF
+
+/* kasan_enabled() is GPL-only */
+#undef HAVE_KASAN_ENABLED_GPL_ONLY
 
 /* kernel has kernel_fpu_* functions */
 #undef HAVE_KERNEL_FPU
@@ -467,9 +524,6 @@
 /* building against unsupported kernel version */
 #undef HAVE_LINUX_EXPERIMENTAL
 
-/* Define to 1 if you have the <linux/stat.h> header file. */
-#undef HAVE_LINUX_STAT_H
-
 /* makedev() is declared in sys/mkdev.h */
 #undef HAVE_MAKEDEV_IN_MKDEV
 
@@ -479,8 +533,14 @@
 /* Noting that make_request_fn() returns blk_qc_t */
 #undef HAVE_MAKE_REQUEST_FN_RET_QC
 
-/* Define to 1 if you have the 'mlockall' function. */
+/* Define to 1 if you have the <memory.h> header file. */
+#undef HAVE_MEMORY_H
+
+/* Define to 1 if you have the `mlockall' function. */
 #undef HAVE_MLOCKALL
+
+/* 'flags' in 'struct page' is a struct */
+#undef HAVE_MM_PAGE_FLAGS_STRUCT
 
 /* PG_error flag is available */
 #undef HAVE_MM_PAGE_FLAG_ERROR
@@ -491,8 +551,14 @@
 /* page_size() is available */
 #undef HAVE_MM_PAGE_SIZE
 
+/* mount_setattr() and struct mount_attr are available */
+#undef HAVE_MOUNT_SETATTR
+
 /* Define if host toolchain supports MOVBE */
 #undef HAVE_MOVBE
+
+/* Define if ns_type is accessible through ns_common */
+#undef HAVE_NS_COMMON_TYPE
 
 /* folio_wait_bit() exists */
 #undef HAVE_PAGEMAP_FOLIO_WAIT_BIT
@@ -511,6 +577,9 @@
 
 /* pin_user_pages_unlocked() is available */
 #undef HAVE_PIN_USER_PAGES_UNLOCKED
+
+/* posix_acl_to_xattr() allocates its result */
+#undef HAVE_POSIX_ACL_TO_XATTR_ALLOC
 
 /* proc_handler ctl_table arg is const */
 #undef HAVE_PROC_HANDLER_CTL_TABLE_CONST
@@ -535,9 +604,6 @@
 
 /* register_sysctl_table exists */
 #undef HAVE_REGISTER_SYSCTL_TABLE
-
-/* iops->rename() wants flags */
-#undef HAVE_RENAME_WANTS_FLAGS
 
 /* revalidate_disk() is available */
 #undef HAVE_REVALIDATE_DISK
@@ -565,6 +631,9 @@
 
 /* iops->set_acl() takes 4 args, arg2 is struct dentry * */
 #undef HAVE_SET_ACL_USERNS_DENTRY_ARG2
+
+/* Define if set_default_d_op() is available */
+#undef HAVE_SET_DEFAULT_D_OP
 
 /* shrinker_register exists */
 #undef HAVE_SHRINKER_REGISTER
@@ -611,9 +680,6 @@
 /* Define to 1 if you have the <stdint.h> header file. */
 #undef HAVE_STDINT_H
 
-/* Define to 1 if you have the <stdio.h> header file. */
-#undef HAVE_STDIO_H
-
 /* Define to 1 if you have the <stdlib.h> header file. */
 #undef HAVE_STDLIB_H
 
@@ -623,10 +689,10 @@
 /* Define to 1 if you have the <string.h> header file. */
 #undef HAVE_STRING_H
 
-/* Define to 1 if you have the 'strlcat' function. */
+/* Define to 1 if you have the `strlcat' function. */
 #undef HAVE_STRLCAT
 
-/* Define to 1 if you have the 'strlcpy' function. */
+/* Define to 1 if you have the `strlcpy' function. */
 #undef HAVE_STRLCPY
 
 /* submit_bio is member of struct block_device_operations */
@@ -671,7 +737,7 @@
 /* kernel has totalram_pages() */
 #undef HAVE_TOTALRAM_PAGES_FUNC
 
-/* Define to 1 if you have the 'udev_device_get_is_initialized' function. */
+/* Define to 1 if you have the `udev_device_get_is_initialized' function. */
 #undef HAVE_UDEV_DEVICE_GET_IS_INITIALIZED
 
 /* kernel has __kernel_fpu_* functions */
@@ -704,6 +770,12 @@
 /* migrate_folio exists */
 #undef HAVE_VFS_MIGRATE_FOLIO
 
+/* vfs_parse_fs_string() takes 3 args */
+#undef HAVE_VFS_PARSE_FS_STRING_3ARGS
+
+/* vfs_path_lookup() is exported */
+#undef HAVE_VFS_PATH_LOOKUP_EXPORTED
+
 /* address_space_operations->readpages exists */
 #undef HAVE_VFS_READPAGES
 
@@ -727,6 +799,9 @@
 
 /* int (*writepage_t)() takes struct folio* */
 #undef HAVE_WRITEPAGE_T_FOLIO
+
+/* write_cache_pages() is available */
+#undef HAVE_WRITE_CACHE_PAGES
 
 /* xattr_handler->get() wants dentry and inode and flags */
 #undef HAVE_XATTR_GET_DENTRY_INODE_FLAGS
@@ -815,9 +890,7 @@
 /* pde_data() is PDE_DATA() */
 #undef SPL_PDE_DATA
 
-/* Define to 1 if all of the C89 standard headers exist (not just the ones
-   required in a freestanding environment). This macro is provided for
-   backward compatibility; new code need not use it. */
+/* Define to 1 if you have the ANSI C header files. */
 #undef STDC_HEADERS
 
 /* True if ZFS is to be compiled for a FreeBSD system */

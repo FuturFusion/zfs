@@ -22,6 +22,7 @@
 /*
  * Copyright (c) 2011, Lawrence Livermore National Security, LLC.
  * Copyright (c) 2015 by Chunwei Chen. All rights reserved.
+ * Copyright (c) 2025, Rob Norris <robn@despairlabs.com>
  */
 
 
@@ -40,6 +41,9 @@
 #include <linux/fadvise.h>
 #ifdef HAVE_VFS_FILEMAP_DIRTY_FOLIO
 #include <linux/writeback.h>
+#endif
+#ifdef HAVE_FILELOCK_HEADER
+#include <linux/filelock.h>
 #endif
 
 /*
@@ -444,6 +448,7 @@ zpl_putpage(struct page *pp, struct writeback_control *wbc, void *data)
 	return (ret);
 }
 
+#ifdef HAVE_WRITE_CACHE_PAGES
 #ifdef HAVE_WRITEPAGE_T_FOLIO
 static int
 zpl_putfolio(struct folio *pp, struct writeback_control *wbc, void *data)
@@ -465,6 +470,78 @@ zpl_write_cache_pages(struct address_space *mapping,
 #endif
 	return (result);
 }
+#else
+static inline int
+zpl_write_cache_pages(struct address_space *mapping,
+    struct writeback_control *wbc, void *data)
+{
+	pgoff_t start = wbc->range_start >> PAGE_SHIFT;
+	pgoff_t end = wbc->range_end >> PAGE_SHIFT;
+
+	struct folio_batch fbatch;
+	folio_batch_init(&fbatch);
+
+	/*
+	 * This atomically (-ish) tags all DIRTY pages in the range with
+	 * TOWRITE, allowing users to continue dirtying or undirtying pages
+	 * while we get on with writeback, without us treading on each other.
+	 */
+	tag_pages_for_writeback(mapping, start, end);
+
+	int err = 0;
+	unsigned int npages;
+
+	/*
+	 * Grab references to the TOWRITE pages just flagged. This may not get
+	 * all of them, so we do it in a loop until there are none left.
+	 */
+	while ((npages = filemap_get_folios_tag(mapping, &start, end,
+	    PAGECACHE_TAG_TOWRITE, &fbatch)) != 0) {
+
+		/* Loop over each page and write it out. */
+		struct folio *folio;
+		while ((folio = folio_batch_next(&fbatch)) != NULL) {
+			folio_lock(folio);
+
+			/*
+			 * If the folio has been remapped, or is no longer
+			 * dirty, then there's nothing to do.
+			 */
+			if (folio->mapping != mapping ||
+			    !folio_test_dirty(folio)) {
+				folio_unlock(folio);
+				continue;
+			}
+
+			/*
+			 * If writeback is already in progress, wait for it to
+			 * finish. We continue after this even if the page
+			 * ends up clean; zfs_putpage() will skip it if no
+			 * further work is required.
+			 */
+			while (folio_test_writeback(folio))
+				folio_wait_bit(folio, PG_writeback);
+
+			/*
+			 * Write it out and collect any error. zfs_putpage()
+			 * will clear the TOWRITE and DIRTY flags, and return
+			 * with the page unlocked.
+			 */
+			int ferr = zpl_putpage(&folio->page, wbc, data);
+			if (err == 0 && ferr != 0)
+				err = ferr;
+
+			/* Housekeeping for the caller. */
+			wbc->nr_to_write -= folio_nr_pages(folio);
+		}
+
+		/* Release any remaining references on the batch. */
+		folio_batch_release(&fbatch);
+	}
+
+	return (err);
+}
+#endif
 
 static int
 zpl_writepages(struct address_space *mapping, struct writeback_control *wbc)
@@ -543,6 +620,8 @@ static long
 zpl_fallocate_common(struct inode *ip, int mode, loff_t offset, loff_t len)
 {
 	cred_t *cr = CRED();
+	znode_t *zp = ITOZ(ip);
+	zfsvfs_t *zfsvfs = ITOZSB(ip);
 	loff_t olen;
 	fstrans_cookie_t cookie;
 	int error = 0;
@@ -576,7 +655,7 @@ zpl_fallocate_common(struct inode *ip, int mode, loff_t offset, loff_t len)
 		bf.l_len = len;
 		bf.l_pid = 0;
 
-		error = -zfs_space(ITOZ(ip), F_FREESP, &bf, O_RDWR, offset, cr);
+		error = -zfs_space(zp, F_FREESP, &bf, O_RDWR, offset, cr);
 	} else if ((mode & ~FALLOC_FL_KEEP_SIZE) == 0) {
 		unsigned int percent = zfs_fallocate_reserve_percent;
 		struct kstatfs statfs;
@@ -591,7 +670,7 @@ zpl_fallocate_common(struct inode *ip, int mode, loff_t offset, loff_t len)
 		 * Use zfs_statvfs() instead of dmu_objset_space() since it
 		 * also checks project quota limits, which are relevant here.
 		 */
-		error = zfs_statvfs(ip, &statfs);
+		error = -zfs_statvfs(ip, &statfs);
 		if (error)
 			goto out_unmark;
 
@@ -604,8 +683,19 @@ zpl_fallocate_common(struct inode *ip, int mode, loff_t offset, loff_t len)
 			error = -ENOSPC;
 			goto out_unmark;
 		}
-		if (!(mode & FALLOC_FL_KEEP_SIZE) && offset + len > olen)
-			error = zfs_freesp(ITOZ(ip), offset + len, 0, 0, FALSE);
+		if (!(mode & FALLOC_FL_KEEP_SIZE) && offset + len > olen) {
+			error = zpl_enter_verify_zp(zfsvfs, zp, FTAG);
+			if (error)
+				goto out_unmark;
+
+			/*
+			 * extend file: log=TRUE drives z_seq bump,
+			 * mtime/ctime advance, and TX_TRUNCATE ZIL
+			 * record; matches zfs_space().
+			 */
+			error = -zfs_freesp(zp, offset + len, 0, 0, TRUE);
+			zfs_exit(zfsvfs, FTAG);
+		}
 	}
 out_unmark:
 	spl_fstrans_unmark(cookie);
@@ -649,38 +739,21 @@ zpl_fadvise(struct file *filp, loff_t offset, loff_t len, int advice)
 	if ((error = zpl_enter_verify_zp(zfsvfs, zp, FTAG)) != 0)
 		return (error);
 
-	switch (advice) {
-	case POSIX_FADV_SEQUENTIAL:
-	case POSIX_FADV_WILLNEED:
-#ifdef HAVE_GENERIC_FADVISE
-		if (zn_has_cached_data(zp, offset, offset + len - 1))
-			error = generic_fadvise(filp, offset, len, advice);
-#endif
-		/*
-		 * Pass on the caller's size directly, but note that
-		 * dmu_prefetch_max will effectively cap it.  If there
-		 * really is a larger sequential access pattern, perhaps
-		 * dmu_zfetch will detect it.
-		 */
-		if (len == 0)
-			len = i_size_read(ip) - offset;
-
-		dmu_prefetch(os, zp->z_id, 0, offset, len,
+	if (advice == POSIX_FADV_WILLNEED) {
+		loff_t rlen = len ? len : i_size_read(ip) - offset;
+		dmu_prefetch(os, zp->z_id, 0, offset, rlen,
 		    ZIO_PRIORITY_ASYNC_READ);
-		break;
-	case POSIX_FADV_NORMAL:
-	case POSIX_FADV_RANDOM:
-	case POSIX_FADV_DONTNEED:
-	case POSIX_FADV_NOREUSE:
-		/* ignored for now */
-		break;
-	default:
-		error = -EINVAL;
-		break;
+		if (!zn_has_cached_data(zp, offset, offset + rlen - 1)) {
+			zfs_exit(zfsvfs, FTAG);
+			return (error);
+		}
 	}
 
 	zfs_exit(zfsvfs, FTAG);
 
+#ifdef HAVE_GENERIC_FADVISE
+	error = generic_fadvise(filp, offset, len, advice);
+#endif
 	return (error);
 }
 
@@ -1115,6 +1188,7 @@ const struct file_operations zpl_file_operations = {
 	.mmap		= zpl_mmap,
 	.fsync		= zpl_fsync,
 	.fallocate	= zpl_fallocate,
+	.setlease	= generic_setlease,
 	.copy_file_range	= zpl_copy_file_range,
 #ifdef HAVE_VFS_CLONE_FILE_RANGE
 	.clone_file_range	= zpl_clone_file_range,
@@ -1137,6 +1211,7 @@ const struct file_operations zpl_dir_file_operations = {
 	.read		= generic_read_dir,
 	.iterate_shared	= zpl_iterate,
 	.fsync		= zpl_fsync,
+	.setlease	= generic_setlease,
 	.unlocked_ioctl = zpl_ioctl,
 #ifdef CONFIG_COMPAT
 	.compat_ioctl   = zpl_compat_ioctl,

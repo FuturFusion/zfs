@@ -1,9 +1,4 @@
-sudoersddir = $(sysconfdir)/sudoers.d
-sudoersd_DATA = \
-	%D%/sudoers.d/zfs
-
-dist_noinst_DATA += $(sudoersd_DATA)
-
+# SPDX-License-Identifier: CDDL-1.0
 
 sysconf_zfsdir = $(sysconfdir)/zfs
 
@@ -56,6 +51,7 @@ systemdunit_DATA = \
 	%D%/systemd/system/zfs-import-scan.service \
 	%D%/systemd/system/zfs-import.target \
 	%D%/systemd/system/zfs-mount.service \
+	%D%/systemd/system/zfs-mount@.service \
 	%D%/systemd/system/zfs-scrub-monthly@.timer \
 	%D%/systemd/system/zfs-scrub-weekly@.timer \
 	%D%/systemd/system/zfs-scrub@.service \

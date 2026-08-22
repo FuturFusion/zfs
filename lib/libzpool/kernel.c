@@ -918,13 +918,6 @@ secpolicy_zfs(const cred_t *cr)
 	return (0);
 }
 
-int
-secpolicy_zfs_proc(const cred_t *cr, proc_t *proc)
-{
-	(void) cr, (void) proc;
-	return (0);
-}
-
 ksiddomain_t *
 ksid_lookupdomain(const char *dom)
 {
@@ -1078,8 +1071,10 @@ zvol_rename_minors(spa_t *spa, const char *oldname, const char *newname,
  * Returns 0 on success underlying error on failure.
  */
 int
-zfs_file_open(const char *path, int flags, int mode, zfs_file_t **fpp)
+zfs_file_open(const char *path, int flags, int mode, cred_t *cr,
+    zfs_file_t **fpp)
 {
+	(void) cr;
 	int fd = -1;
 	int dump_fd = -1;
 	int err;
@@ -1182,7 +1177,7 @@ zfs_file_write(zfs_file_t *fp, const void *buf, size_t count, ssize_t *resid)
  */
 int
 zfs_file_pwrite(zfs_file_t *fp, const void *buf,
-    size_t count, loff_t pos, ssize_t *resid)
+    size_t count, loff_t pos, uint8_t ashift, ssize_t *resid)
 {
 	ssize_t rc, split, done;
 	int sectors;
@@ -1192,8 +1187,8 @@ zfs_file_pwrite(zfs_file_t *fp, const void *buf,
 	 * system calls so that the process can be killed in between.
 	 * This is used by ztest to simulate realistic failure modes.
 	 */
-	sectors = count >> SPA_MINBLOCKSHIFT;
-	split = (sectors > 0 ? rand() % sectors : 0) << SPA_MINBLOCKSHIFT;
+	sectors = count >> ashift;
+	split = (sectors > 0 ? rand() % sectors : 0) << ashift;
 	rc = pwrite64(fp->f_fd, buf, split, pos);
 	if (rc != -1) {
 		done = rc;

@@ -86,6 +86,19 @@ int zfs_default_ibs = DN_MAX_INDBLKSHIFT;
 static kmem_cbrc_t dnode_move(void *, void *, size_t, void *);
 #endif /* _KERNEL */
 
+static char *
+rt_name(dnode_t *dn, const char *name)
+{
+	struct objset *os = dn->dn_objset;
+
+	return (kmem_asprintf("{spa=%s objset=%llu obj=%llu %s}",
+	    spa_name(os->os_spa),
+	    (u_longlong_t)(os->os_dsl_dataset ?
+	    os->os_dsl_dataset->ds_object : DMU_META_OBJSET),
+	    (u_longlong_t)dn->dn_object,
+	    name));
+}
+
 static int
 dbuf_compare(const void *x1, const void *x2)
 {
@@ -2435,9 +2448,13 @@ done:
 	mutex_enter(&dn->dn_mtx);
 	{
 		int txgoff = tx->tx_txg & TXG_MASK;
+
+		FREE_RANGE_VERIFY(tx, dn);
 		if (dn->dn_free_ranges[txgoff] == NULL) {
-			dn->dn_free_ranges[txgoff] = zfs_range_tree_create(NULL,
-			    ZFS_RANGE_SEG64, NULL, 0, 0);
+			dn->dn_free_ranges[txgoff] =
+			    zfs_range_tree_create_flags(
+			    NULL, ZFS_RANGE_SEG64, NULL, 0, 0,
+			    ZFS_RT_F_DYN_NAME, rt_name(dn, "dn_free_ranges"));
 		}
 		zfs_range_tree_clear(dn->dn_free_ranges[txgoff], blkid, nblks);
 		zfs_range_tree_add(dn->dn_free_ranges[txgoff], blkid, nblks);
@@ -2488,6 +2505,37 @@ dnode_block_freed(dnode_t *dn, uint64_t blkid)
 	}
 	mutex_exit(&dn->dn_mtx);
 	return (i < TXG_SIZE);
+}
+
+/*
+ * Check if a level-0 block was freed in a TXG after override_txg.
+ *
+ * When a block has been overridden (e.g., by block clone or direct I/O),
+ * we can't use dnode_block_freed() because it checks all active TXGs.
+ * A free from a TXG *before* the override should not make the block appear
+ * freed.
+ */
+uint64_t
+dnode_block_freed_after(dnode_t *dn, uint64_t blkid, uint64_t override_txg)
+{
+	ASSERT(blkid != DMU_BONUS_BLKID);
+	ASSERT(blkid != DMU_SPILL_BLKID);
+
+	if (dn->dn_free_txg)
+		return (TRUE);
+
+	mutex_enter(&dn->dn_mtx);
+	uint64_t open = spa_open_txg(dmu_objset_spa(dn->dn_objset));
+	for (uint64_t txg = override_txg + 1; txg <= open; txg++) {
+		int i = txg & TXG_MASK;
+		if (dn->dn_free_ranges[i] != NULL &&
+		    zfs_range_tree_contains(dn->dn_free_ranges[i], blkid, 1)) {
+			mutex_exit(&dn->dn_mtx);
+			return (TRUE);
+		}
+	}
+	mutex_exit(&dn->dn_mtx);
+	return (FALSE);
 }
 
 /* call from syncing context when we actually write/free space for this dnode */
@@ -2559,6 +2607,11 @@ dnode_next_offset_level(dnode_t *dn, int flags, uint64_t *offset,
 		error = 0;
 		epb = dn->dn_phys->dn_nblkptr;
 		data = dn->dn_phys->dn_blkptr;
+		if (dn->dn_dbuf != NULL)
+			rw_enter(&dn->dn_dbuf->db_rwlock, RW_READER);
+		else if (dmu_objset_ds(dn->dn_objset) != NULL)
+			rrw_enter(&dmu_objset_ds(dn->dn_objset)->ds_bp_rwlock,
+			    RW_READER, FTAG);
 	} else {
 		uint64_t blkid = dbuf_whichblock(dn, lvl, *offset);
 		error = dbuf_hold_impl(dn, lvl, blkid, TRUE, FALSE, FTAG, &db);
@@ -2663,9 +2716,41 @@ dnode_next_offset_level(dnode_t *dn, int flags, uint64_t *offset,
 	if (db != NULL) {
 		rw_exit(&db->db_rwlock);
 		dbuf_rele(db, FTAG);
+	} else {
+		if (dn->dn_dbuf != NULL)
+			rw_exit(&dn->dn_dbuf->db_rwlock);
+		else if (dmu_objset_ds(dn->dn_objset) != NULL)
+			rrw_exit(&dmu_objset_ds(dn->dn_objset)->ds_bp_rwlock,
+			    FTAG);
 	}
 
 	return (error);
+}
+
+/*
+ * Adjust *offset to the next (or previous) block byte offset at lvl.
+ * Returns FALSE if *offset would overflow or underflow.
+ */
+static boolean_t
+dnode_next_block(dnode_t *dn, int flags, uint64_t *offset, int lvl)
+{
+	int epbs = dn->dn_indblkshift - SPA_BLKPTRSHIFT;
+	int span = lvl * epbs + dn->dn_datablkshift;
+	uint64_t blkid, maxblkid;
+
+	if (span >= 8 * sizeof (uint64_t))
+		return (B_FALSE);
+
+	blkid = *offset >> span;
+	maxblkid = 1ULL << (8 * sizeof (*offset) - span);
+	if (!(flags & DNODE_FIND_BACKWARDS) && blkid + 1 < maxblkid)
+		*offset = (blkid + 1) << span;
+	else if ((flags & DNODE_FIND_BACKWARDS) && blkid > 0)
+		*offset = (blkid << span) - 1;
+	else
+		return (B_FALSE);
+
+	return (B_TRUE);
 }
 
 /*
@@ -2695,7 +2780,7 @@ int
 dnode_next_offset(dnode_t *dn, int flags, uint64_t *offset,
     int minlvl, uint64_t blkfill, uint64_t txg)
 {
-	uint64_t initial_offset = *offset;
+	uint64_t matched = *offset;
 	int lvl, maxlvl;
 	int error = 0;
 
@@ -2719,16 +2804,36 @@ dnode_next_offset(dnode_t *dn, int flags, uint64_t *offset,
 
 	maxlvl = dn->dn_phys->dn_nlevels;
 
-	for (lvl = minlvl; lvl <= maxlvl; lvl++) {
+	for (lvl = minlvl; lvl <= maxlvl; ) {
 		error = dnode_next_offset_level(dn,
 		    flags, offset, lvl, blkfill, txg);
-		if (error != ESRCH)
+		if (error == 0 && lvl > minlvl) {
+			--lvl;
+			matched = *offset;
+		} else if (error == ESRCH && lvl < maxlvl &&
+		    dnode_next_block(dn, flags, &matched, lvl)) {
+			/*
+			 * Continue search at next/prev offset in lvl+1 block.
+			 *
+			 * Usually we only search upwards at the start of the
+			 * search as higher level blocks point at a matching
+			 * minlvl block in most cases, but we backtrack if not.
+			 *
+			 * This can happen for txg > 0 searches if the block
+			 * contains only BPs/dnodes freed at that txg. It also
+			 * happens if we are still syncing out the tree, and
+			 * some BP's at higher levels are not updated yet.
+			 *
+			 * We must adjust offset to avoid coming back to the
+			 * same offset and getting stuck looping forever. This
+			 * also deals with the case where offset is already at
+			 * the beginning or end of the object.
+			 */
+			++lvl;
+			*offset = matched;
+		} else {
 			break;
-	}
-
-	while (error == 0 && --lvl >= minlvl) {
-		error = dnode_next_offset_level(dn,
-		    flags, offset, lvl, blkfill, txg);
+		}
 	}
 
 	/*
@@ -2740,9 +2845,6 @@ dnode_next_offset(dnode_t *dn, int flags, uint64_t *offset,
 		error = 0;
 	}
 
-	if (error == 0 && (flags & DNODE_FIND_BACKWARDS ?
-	    initial_offset < *offset : initial_offset > *offset))
-		error = SET_ERROR(ESRCH);
 out:
 	if (!(flags & DNODE_FIND_HAVELOCK))
 		rw_exit(&dn->dn_struct_rwlock);

@@ -364,13 +364,15 @@ spa_vdev_removal_create(vdev_t *vd)
 	spa_vdev_removal_t *svr = kmem_zalloc(sizeof (*svr), KM_SLEEP);
 	mutex_init(&svr->svr_lock, NULL, MUTEX_DEFAULT, NULL);
 	cv_init(&svr->svr_cv, NULL, CV_DEFAULT, NULL);
-	svr->svr_allocd_segs = zfs_range_tree_create(NULL, ZFS_RANGE_SEG64,
-	    NULL, 0, 0);
+	svr->svr_allocd_segs = zfs_range_tree_create_flags(
+	    NULL, ZFS_RANGE_SEG64, NULL, 0, 0,
+	    ZFS_RT_F_DYN_NAME, vdev_rt_name(vd, "svr_allocd_segs"));
 	svr->svr_vdev_id = vd->vdev_id;
 
 	for (int i = 0; i < TXG_SIZE; i++) {
-		svr->svr_frees[i] = zfs_range_tree_create(NULL, ZFS_RANGE_SEG64,
-		    NULL, 0, 0);
+		svr->svr_frees[i] = zfs_range_tree_create_flags(
+		    NULL, ZFS_RANGE_SEG64, NULL, 0, 0,
+		    ZFS_RT_F_DYN_NAME, vdev_rt_name(vd, "svr_frees"));
 		list_create(&svr->svr_new_segments[i],
 		    sizeof (vdev_indirect_mapping_entry_t),
 		    offsetof(vdev_indirect_mapping_entry_t, vime_node));
@@ -1179,8 +1181,9 @@ spa_vdev_copy_segment(vdev_t *vd, zfs_range_tree_t *segs,
 	 * relative to the start of the range to be copied (i.e. relative to the
 	 * local variable "start").
 	 */
-	zfs_range_tree_t *obsolete_segs = zfs_range_tree_create(NULL,
-	    ZFS_RANGE_SEG64, NULL, 0, 0);
+	zfs_range_tree_t *obsolete_segs = zfs_range_tree_create_flags(
+	    NULL, ZFS_RANGE_SEG64, NULL, 0, 0,
+	    ZFS_RT_F_DYN_NAME, vdev_rt_name(vd, "obsolete_segs"));
 
 	zfs_btree_index_t where;
 	zfs_range_seg_t *rs = zfs_btree_first(&segs->rt_root, &where);
@@ -1393,14 +1396,17 @@ vdev_remove_complete(spa_t *spa)
 	vdev_remove_replace_with_indirect(vd, txg);
 
 	/*
-	 * We now release the locks, allowing spa_sync to run and finish the
+	 * Release the config lock and allow spa_sync to run and finish the
 	 * removal via vdev_remove_complete_sync in syncing context.
+	 *
+	 * Retain the namespace lock to prevent the pool from being exported
+	 * or destroyed before completion of the device removal.
 	 *
 	 * Note that we hold on to the vdev_t that has been replaced.  Since
 	 * it isn't part of the vdev tree any longer, it can't be concurrently
 	 * manipulated, even while we don't have the config lock.
 	 */
-	(void) spa_vdev_exit(spa, NULL, txg, 0);
+	(void) spa_vdev_config_exit(spa, NULL, txg, 0, FTAG);
 
 	/*
 	 * Top ZAP should have been transferred to the indirect vdev in
@@ -1413,7 +1419,8 @@ vdev_remove_complete(spa_t *spa)
 	 */
 	ASSERT0(vd->vdev_leaf_zap);
 
-	txg = spa_vdev_enter(spa);
+	/* Update the vdev labels and dirty the config. */
+	txg = spa_vdev_config_enter(spa);
 	(void) vdev_label_init(vd, 0, VDEV_LABEL_REMOVE);
 	/*
 	 * Request to update the config and the config cachefile.
@@ -1448,8 +1455,9 @@ spa_vdev_copy_impl(vdev_t *vd, spa_vdev_removal_t *svr, vdev_copy_arg_t *vca,
 	 * allocated segments that we are copying.  We may also be copying
 	 * free segments (of up to vdev_removal_max_span bytes).
 	 */
-	zfs_range_tree_t *segs = zfs_range_tree_create(NULL, ZFS_RANGE_SEG64,
-	    NULL, 0, 0);
+	zfs_range_tree_t *segs = zfs_range_tree_create_flags(
+	    NULL, ZFS_RANGE_SEG64, NULL, 0, 0,
+	    ZFS_RT_F_DYN_NAME, vdev_rt_name(vd, "spa_vdev_copy_impl:segs"));
 	for (;;) {
 		zfs_range_tree_t *rt = svr->svr_allocd_segs;
 		zfs_range_seg_t *rs = zfs_range_tree_first(rt);
@@ -1610,8 +1618,9 @@ spa_vdev_remove_thread(void *arg)
 	vca.vca_read_error_bytes = 0;
 	vca.vca_write_error_bytes = 0;
 
-	zfs_range_tree_t *segs = zfs_range_tree_create(NULL, ZFS_RANGE_SEG64,
-	    NULL, 0, 0);
+	zfs_range_tree_t *segs = zfs_range_tree_create_flags(
+	    NULL, ZFS_RANGE_SEG64, NULL, 0, 0,
+	    ZFS_RT_F_DYN_NAME, vdev_rt_name(vd, "spa_vdev_remove_thread:segs"));
 
 	mutex_enter(&svr->svr_lock);
 
@@ -1724,7 +1733,8 @@ again:
 			dmu_tx_t *tx =
 			    dmu_tx_create_dd(spa_get_dsl(spa)->dp_mos_dir);
 
-			VERIFY0(dmu_tx_assign(tx, DMU_TX_WAIT));
+			VERIFY0(dmu_tx_assign(tx, DMU_TX_WAIT |
+			    DMU_TX_SUSPEND));
 			uint64_t txg = dmu_tx_get_txg(tx);
 
 			/*
@@ -1894,8 +1904,9 @@ spa_vdev_remove_cancel_sync(void *arg, dmu_tx_t *tx)
 		    vdev_indirect_mapping_max_offset(vim));
 	}
 
-	zfs_range_tree_t *segs = zfs_range_tree_create(NULL, ZFS_RANGE_SEG64,
-	    NULL, 0, 0);
+	zfs_range_tree_t *segs = zfs_range_tree_create_flags(
+	    NULL, ZFS_RANGE_SEG64, NULL, 0, 0, ZFS_RT_F_DYN_NAME,
+	    vdev_rt_name(vd, "spa_vdev_remove_cancel_sync:segs"));
 	for (uint64_t msi = 0; msi < vd->vdev_ms_count; msi++) {
 		metaslab_t *msp = vd->vdev_ms[msi];
 
@@ -1931,10 +1942,9 @@ spa_vdev_remove_cancel_sync(void *arg, dmu_tx_t *tx)
 		 * because we have not allocated mappings for it yet.
 		 */
 		uint64_t syncd = vdev_indirect_mapping_max_offset(vim);
-		uint64_t sm_end = msp->ms_sm->sm_start +
-		    msp->ms_sm->sm_size;
-		if (sm_end > syncd)
-			zfs_range_tree_clear(segs, syncd, sm_end - syncd);
+		uint64_t ms_end = msp->ms_start + msp->ms_size;
+		if (ms_end > syncd)
+			zfs_range_tree_clear(segs, syncd, ms_end - syncd);
 
 		zfs_range_tree_vacate(segs, free_mapped_segment_cb, vd);
 	}
@@ -2109,7 +2119,6 @@ spa_vdev_remove_log(vdev_t *vd, uint64_t *txg)
 		ASSERT3P(vd->vdev_log_mg, ==, NULL);
 		return (error);
 	}
-	ASSERT0(vd->vdev_stat.vs_alloc);
 
 	/*
 	 * The evacuation succeeded.  Remove any remaining MOS metadata

@@ -668,8 +668,7 @@ dnode_level_is_l2cacheable(blkptr_t *bp, dnode_t *dn, int64_t level)
 {
 	if (dn->dn_objset->os_secondary_cache == ZFS_CACHE_ALL ||
 	    (dn->dn_objset->os_secondary_cache == ZFS_CACHE_METADATA &&
-	    (level > 0 ||
-	    DMU_OT_IS_METADATA(dn->dn_handle->dnh_dnode->dn_type)))) {
+	    (level > 0 || DMU_OT_IS_METADATA(dn->dn_type)))) {
 		if (l2arc_exclude_special == 0)
 			return (B_TRUE);
 
@@ -866,10 +865,31 @@ dbuf_evict_notify(uint64_t size)
 	 * and grabbing the lock results in massive lock contention.
 	 */
 	if (size > dbuf_cache_target_bytes()) {
-		if (size > dbuf_cache_hiwater_bytes())
+		/*
+		 * Avoid calling dbuf_evict_one() from memory reclaim context
+		 * (e.g. Linux kswapd, FreeBSD pagedaemon) to prevent deadlocks.
+		 * Memory reclaim threads can get stuck waiting for the dbuf
+		 * hash lock.
+		 */
+		if (size > dbuf_cache_hiwater_bytes() &&
+		    !current_is_reclaim_thread()) {
 			dbuf_evict_one();
+		}
 		cv_signal(&dbuf_evict_cv);
 	}
+}
+
+/*
+ * Since dbuf cache size is a fraction of target ARC size, ARC calls this when
+ * its target size is reduced due to memory pressure.
+ */
+void
+dbuf_cache_reduce_target_size(void)
+{
+	uint64_t size = zfs_refcount_count(&dbuf_caches[DB_DBUF_CACHE].size);
+
+	if (size > dbuf_cache_target_bytes())
+		cv_signal(&dbuf_evict_cv);
 }
 
 static int
@@ -1172,16 +1192,9 @@ dbuf_verify(dmu_buf_impl_t *db)
 			ASSERT3U(db->db_parent->db_level, ==, db->db_level+1);
 			ASSERT3U(db->db_parent->db.db_object, ==,
 			    db->db.db_object);
-			/*
-			 * dnode_grow_indblksz() can make this fail if we don't
-			 * have the parent's rwlock.  XXX indblksz no longer
-			 * grows.  safe to do this now?
-			 */
-			if (RW_LOCK_HELD(&db->db_parent->db_rwlock)) {
-				ASSERT3P(db->db_blkptr, ==,
-				    ((blkptr_t *)db->db_parent->db.db_data +
-				    db->db_blkid % epb));
-			}
+			ASSERT3P(db->db_blkptr, ==,
+			    ((blkptr_t *)db->db_parent->db.db_data +
+			    db->db_blkid % epb));
 		}
 	}
 	if ((db->db_blkptr == NULL || BP_IS_HOLE(db->db_blkptr)) &&
@@ -1437,6 +1450,7 @@ dbuf_read_done(zio_t *zio, const zbookmark_phys_t *zb, const blkptr_t *bp,
 static int
 dbuf_read_bonus(dmu_buf_impl_t *db, dnode_t *dn)
 {
+	void* db_data;
 	int bonuslen, max_bonuslen;
 
 	bonuslen = MIN(dn->dn_bonuslen, dn->dn_phys->dn_bonuslen);
@@ -1444,21 +1458,22 @@ dbuf_read_bonus(dmu_buf_impl_t *db, dnode_t *dn)
 	ASSERT(MUTEX_HELD(&db->db_mtx));
 	ASSERT(DB_DNODE_HELD(db));
 	ASSERT3U(bonuslen, <=, db->db.db_size);
-	db->db.db_data = kmem_alloc(max_bonuslen, KM_SLEEP);
+	db_data = kmem_alloc(max_bonuslen, KM_SLEEP);
 	arc_space_consume(max_bonuslen, ARC_SPACE_BONUS);
 	if (bonuslen < max_bonuslen)
-		memset(db->db.db_data, 0, max_bonuslen);
+		memset(db_data, 0, max_bonuslen);
 	if (bonuslen)
-		memcpy(db->db.db_data, DN_BONUS(dn->dn_phys), bonuslen);
+		memcpy(db_data, DN_BONUS(dn->dn_phys), bonuslen);
+	db->db.db_data = db_data;
 	db->db_state = DB_CACHED;
 	DTRACE_SET_STATE(db, "bonus buffer filled");
 	return (0);
 }
 
 static void
-dbuf_handle_indirect_hole(dmu_buf_impl_t *db, dnode_t *dn, blkptr_t *dbbp)
+dbuf_handle_indirect_hole(void *data, dnode_t *dn, blkptr_t *dbbp)
 {
-	blkptr_t *bps = db->db.db_data;
+	blkptr_t *bps = data;
 	uint32_t indbs = 1ULL << dn->dn_indblkshift;
 	int n_bps = indbs >> SPA_BLKPTRSHIFT;
 
@@ -1483,25 +1498,39 @@ static int
 dbuf_read_hole(dmu_buf_impl_t *db, dnode_t *dn, blkptr_t *bp)
 {
 	ASSERT(MUTEX_HELD(&db->db_mtx));
+	arc_buf_t *db_data;
 
 	int is_hole = bp == NULL || BP_IS_HOLE(bp);
 	/*
-	 * For level 0 blocks only, if the above check fails:
-	 * Recheck BP_IS_HOLE() after dnode_block_freed() in case dnode_sync()
-	 * processes the delete record and clears the bp while we are waiting
-	 * for the dn_mtx (resulting in a "no" from block_freed).
+	 * For level 0 blocks only, if the above check didn't find a hole,
+	 * consult dnode_block_freed() to check for pending frees.
+	 *
+	 * If the block has been overridden by a block clone or direct I/O
+	 * write, we can't use dnode_block_freed() directly because it would
+	 * find frees from TXGs before the override, which should not make
+	 * the block appear freed.  Instead, check only free ranges from
+	 * TXGs after the override.
 	 */
-	if (!is_hole && db->db_level == 0)
-		is_hole = dnode_block_freed(dn, db->db_blkid) || BP_IS_HOLE(bp);
+	if (!is_hole && db->db_level == 0) {
+		dbuf_dirty_record_t *dr = list_head(&db->db_dirty_records);
+		if (dr != NULL &&
+		    (dr->dt.dl.dr_brtwrite || dr->dt.dl.dr_diowrite)) {
+			is_hole = dnode_block_freed_after(dn,
+			    db->db_blkid, dr->dr_txg);
+		} else {
+			is_hole = dnode_block_freed(dn, db->db_blkid);
+		}
+	}
 
 	if (is_hole) {
-		dbuf_set_data(db, dbuf_alloc_arcbuf(db));
-		memset(db->db.db_data, 0, db->db.db_size);
+		db_data = dbuf_alloc_arcbuf(db);
+		memset(db_data->b_data, 0, db->db.db_size);
 
 		if (bp != NULL && db->db_level > 0 && BP_IS_HOLE(bp) &&
 		    BP_GET_LOGICAL_BIRTH(bp) != 0) {
-			dbuf_handle_indirect_hole(db, dn, bp);
+			dbuf_handle_indirect_hole(db_data->b_data, dn, bp);
 		}
+		dbuf_set_data(db, db_data);
 		db->db_state = DB_CACHED;
 		DTRACE_SET_STATE(db, "hole read satisfied");
 		return (0);
@@ -2193,6 +2222,17 @@ dbuf_dirty_lightweight(dnode_t *dn, uint64_t blkid, dmu_tx_t *tx)
 
 	mutex_enter(&dn->dn_mtx);
 	int txgoff = tx->tx_txg & TXG_MASK;
+
+	/*
+	 * Assert that we are not modifying the range tree for the syncing
+	 * TXG from a non-syncing thread. We verify that the tx's
+	 * transaction group is strictly newer than the one currently
+	 * syncing (meaning we are in open context). If this triggers,
+	 * it indicates a race where syncing dn_free_range tree is
+	 * being modified while dnode_sync() may be iterating over it.
+	 */
+	ASSERT(tx->tx_txg > spa_syncing_txg(dn->dn_objset->os_spa));
+
 	if (dn->dn_free_ranges[txgoff] != NULL) {
 		zfs_range_tree_clear(dn->dn_free_ranges[txgoff], blkid, 1);
 	}
@@ -2401,6 +2441,7 @@ dbuf_dirty(dmu_buf_impl_t *db, dmu_tx_t *tx)
 	    db->db_blkid != DMU_SPILL_BLKID) {
 		mutex_enter(&dn->dn_mtx);
 		if (dn->dn_free_ranges[txgoff] != NULL) {
+			FREE_RANGE_VERIFY(tx, dn);
 			zfs_range_tree_clear(dn->dn_free_ranges[txgoff],
 			    db->db_blkid, 1);
 		}
@@ -2520,6 +2561,7 @@ dbuf_undirty_bonus(dbuf_dirty_record_t *dr)
 {
 	dmu_buf_impl_t *db = dr->dr_dbuf;
 
+	ASSERT(MUTEX_HELD(&db->db_mtx));
 	if (dr->dt.dl.dr_data != db->db.db_data) {
 		struct dnode *dn = dr->dr_dnode;
 		int max_bonuslen = DN_SLOTS_TO_BONUSLEN(dn->dn_num_slots);
@@ -3373,12 +3415,8 @@ dbuf_findbp(dnode_t *dn, int level, uint64_t blkid, int fail_sparse,
 			*parentp = NULL;
 			return (err);
 		}
-		rw_enter(&(*parentp)->db_rwlock, RW_READER);
 		*bpp = ((blkptr_t *)(*parentp)->db.db_data) +
 		    (blkid & ((1ULL << epbs) - 1));
-		if (blkid > (dn->dn_phys->dn_maxblkid >> (level * epbs)))
-			ASSERT(BP_IS_HOLE(*bpp));
-		rw_exit(&(*parentp)->db_rwlock);
 		return (0);
 	} else {
 		/* the block is referenced from the dnode */
@@ -3525,7 +3563,6 @@ typedef struct dbuf_prefetch_arg {
 	int dpa_curlevel; /* The current level that we're reading */
 	dnode_t *dpa_dnode; /* The dnode associated with the prefetch */
 	zio_priority_t dpa_prio; /* The priority I/Os should be issued at. */
-	zio_t *dpa_zio; /* The parent zio_t for all prefetches. */
 	arc_flags_t dpa_aflags; /* Flags to pass to the final prefetch. */
 	dbuf_prefetch_fn dpa_cb; /* prefetch completion callback */
 	void *dpa_arg; /* prefetch completion arg */
@@ -3560,12 +3597,9 @@ dbuf_issue_final_prefetch_done(zio_t *zio, const zbookmark_phys_t *zb,
 static void
 dbuf_issue_final_prefetch(dbuf_prefetch_arg_t *dpa, blkptr_t *bp)
 {
-	ASSERT(!BP_IS_REDACTED(bp) ||
-	    dsl_dataset_feature_is_active(
-	    dpa->dpa_dnode->dn_objset->os_dsl_dataset,
-	    SPA_FEATURE_REDACTED_DATASETS));
-
-	if (BP_IS_HOLE(bp) || BP_IS_EMBEDDED(bp) || BP_IS_REDACTED(bp))
+	ASSERT(!BP_IS_HOLE(bp));
+	ASSERT(!BP_IS_REDACTED(bp));
+	if (BP_IS_EMBEDDED(bp))
 		return (dbuf_prefetch_fini(dpa, B_FALSE));
 
 	int zio_flags = ZIO_FLAG_CANFAIL | ZIO_FLAG_SPECULATIVE;
@@ -3580,8 +3614,7 @@ dbuf_issue_final_prefetch(dbuf_prefetch_arg_t *dpa, blkptr_t *bp)
 
 	ASSERT3U(dpa->dpa_curlevel, ==, BP_GET_LEVEL(bp));
 	ASSERT3U(dpa->dpa_curlevel, ==, dpa->dpa_zb.zb_level);
-	ASSERT(dpa->dpa_zio != NULL);
-	(void) arc_read(dpa->dpa_zio, dpa->dpa_spa, bp,
+	(void) arc_read(NULL, dpa->dpa_spa, bp,
 	    dbuf_issue_final_prefetch_done, dpa,
 	    dpa->dpa_prio, zio_flags, &aflags, &dpa->dpa_zb);
 }
@@ -3651,10 +3684,10 @@ dbuf_prefetch_indirect_done(zio_t *zio, const zbookmark_phys_t *zb,
 	blkptr_t *bp = ((blkptr_t *)abuf->b_data) +
 	    P2PHASE(nextblkid, 1ULL << dpa->dpa_epbs);
 
-	ASSERT(!BP_IS_REDACTED(bp) || (dpa->dpa_dnode &&
+	ASSERT(!BP_IS_REDACTED(bp) || dpa->dpa_dnode == NULL ||
 	    dsl_dataset_feature_is_active(
 	    dpa->dpa_dnode->dn_objset->os_dsl_dataset,
-	    SPA_FEATURE_REDACTED_DATASETS)));
+	    SPA_FEATURE_REDACTED_DATASETS));
 	if (BP_IS_HOLE(bp) || BP_IS_REDACTED(bp)) {
 		arc_buf_destroy(abuf, private);
 		dbuf_prefetch_fini(dpa, B_TRUE);
@@ -3667,15 +3700,21 @@ dbuf_prefetch_indirect_done(zio_t *zio, const zbookmark_phys_t *zb,
 		zbookmark_phys_t zb;
 
 		/* flag if L2ARC eligible, l2arc_noprefetch then decides */
-		if (dpa->dpa_aflags & ARC_FLAG_L2CACHE)
-			iter_aflags |= ARC_FLAG_L2CACHE;
+		if (dpa->dpa_dnode) {
+			if (dnode_level_is_l2cacheable(bp, dpa->dpa_dnode,
+			    dpa->dpa_curlevel))
+				iter_aflags |= ARC_FLAG_L2CACHE;
+		} else {
+			if (dpa->dpa_aflags & ARC_FLAG_L2CACHE)
+				iter_aflags |= ARC_FLAG_L2CACHE;
+		}
 
 		ASSERT3U(dpa->dpa_curlevel, ==, BP_GET_LEVEL(bp));
 
 		SET_BOOKMARK(&zb, dpa->dpa_zb.zb_objset,
 		    dpa->dpa_zb.zb_object, dpa->dpa_curlevel, nextblkid);
 
-		(void) arc_read(dpa->dpa_zio, dpa->dpa_spa,
+		(void) arc_read(NULL, dpa->dpa_spa,
 		    bp, dbuf_prefetch_indirect_done, dpa,
 		    ZIO_PRIORITY_SYNC_READ,
 		    ZIO_FLAG_CANFAIL | ZIO_FLAG_SPECULATIVE,
@@ -3770,9 +3809,6 @@ dbuf_prefetch_impl(dnode_t *dn, int64_t level, uint64_t blkid,
 
 	ASSERT3U(curlevel, ==, BP_GET_LEVEL(&bp));
 
-	zio_t *pio = zio_root(dmu_objset_spa(dn->dn_objset), NULL, NULL,
-	    ZIO_FLAG_CANFAIL);
-
 	dbuf_prefetch_arg_t *dpa = kmem_zalloc(sizeof (*dpa), KM_SLEEP);
 	dsl_dataset_t *ds = dn->dn_objset->os_dsl_dataset;
 	SET_BOOKMARK(&dpa->dpa_zb, ds != NULL ? ds->ds_object : DMU_META_OBJSET,
@@ -3783,7 +3819,6 @@ dbuf_prefetch_impl(dnode_t *dn, int64_t level, uint64_t blkid,
 	dpa->dpa_spa = dn->dn_objset->os_spa;
 	dpa->dpa_dnode = dn;
 	dpa->dpa_epbs = epbs;
-	dpa->dpa_zio = pio;
 	dpa->dpa_cb = cb;
 	dpa->dpa_arg = arg;
 
@@ -3807,22 +3842,17 @@ dbuf_prefetch_impl(dnode_t *dn, int64_t level, uint64_t blkid,
 		zbookmark_phys_t zb;
 
 		/* flag if L2ARC eligible, l2arc_noprefetch then decides */
-		if (dnode_level_is_l2cacheable(&bp, dn, level))
+		if (dnode_level_is_l2cacheable(&bp, dn, curlevel))
 			iter_aflags |= ARC_FLAG_L2CACHE;
 
 		SET_BOOKMARK(&zb, ds != NULL ? ds->ds_object : DMU_META_OBJSET,
 		    dn->dn_object, curlevel, curblkid);
-		(void) arc_read(dpa->dpa_zio, dpa->dpa_spa,
+		(void) arc_read(NULL, dpa->dpa_spa,
 		    &bp, dbuf_prefetch_indirect_done, dpa,
 		    ZIO_PRIORITY_SYNC_READ,
 		    ZIO_FLAG_CANFAIL | ZIO_FLAG_SPECULATIVE,
 		    &iter_aflags, &zb);
 	}
-	/*
-	 * We use pio here instead of dpa_zio since it's possible that
-	 * dpa may have already been freed.
-	 */
-	zio_nowait(pio);
 	return (1);
 no_issue:
 	if (cb != NULL)
@@ -3851,6 +3881,7 @@ dbuf_hold_copy(dnode_t *dn, dmu_buf_impl_t *db)
 {
 	dbuf_dirty_record_t *dr = db->db_data_pending;
 	arc_buf_t *data = dr->dt.dl.dr_data;
+	arc_buf_t *db_data;
 	enum zio_compress compress_type = arc_get_compression(data);
 	uint8_t complevel = arc_get_complevel(data);
 
@@ -3861,22 +3892,21 @@ dbuf_hold_copy(dnode_t *dn, dmu_buf_impl_t *db)
 		uint8_t mac[ZIO_DATA_MAC_LEN];
 
 		arc_get_raw_params(data, &byteorder, salt, iv, mac);
-		dbuf_set_data(db, arc_alloc_raw_buf(dn->dn_objset->os_spa, db,
+		db_data = arc_alloc_raw_buf(dn->dn_objset->os_spa, db,
 		    dmu_objset_id(dn->dn_objset), byteorder, salt, iv, mac,
 		    dn->dn_type, arc_buf_size(data), arc_buf_lsize(data),
-		    compress_type, complevel));
+		    compress_type, complevel);
 	} else if (compress_type != ZIO_COMPRESS_OFF) {
-		dbuf_set_data(db, arc_alloc_compressed_buf(
+		db_data = arc_alloc_compressed_buf(
 		    dn->dn_objset->os_spa, db, arc_buf_size(data),
-		    arc_buf_lsize(data), compress_type, complevel));
+		    arc_buf_lsize(data), compress_type, complevel);
 	} else {
-		dbuf_set_data(db, arc_alloc_buf(dn->dn_objset->os_spa, db,
-		    DBUF_GET_BUFC_TYPE(db), db->db.db_size));
+		db_data = arc_alloc_buf(dn->dn_objset->os_spa, db,
+		    DBUF_GET_BUFC_TYPE(db), db->db.db_size);
 	}
+	memcpy(db_data->b_data, data->b_data, arc_buf_size(data));
 
-	rw_enter(&db->db_rwlock, RW_WRITER);
-	memcpy(db->db.db_data, data->b_data, arc_buf_size(data));
-	rw_exit(&db->db_rwlock);
+	dbuf_set_data(db, db_data);
 }
 
 /*
@@ -3900,7 +3930,8 @@ dbuf_hold_impl(dnode_t *dn, uint8_t level, uint64_t blkid,
 
 	ASSERT(blkid != DMU_BONUS_BLKID);
 	ASSERT(RW_LOCK_HELD(&dn->dn_struct_rwlock));
-	ASSERT3U(dn->dn_nlevels, >, level);
+	if (!fail_sparse)
+		ASSERT3U(dn->dn_nlevels, >, level);
 
 	*dbp = NULL;
 
@@ -3937,6 +3968,7 @@ dbuf_hold_impl(dnode_t *dn, uint8_t level, uint64_t blkid,
 
 	if (db->db_buf != NULL) {
 		arc_buf_access(db->db_buf);
+		ASSERT(MUTEX_HELD(&db->db_mtx));
 		ASSERT3P(db->db.db_data, ==, db->db_buf->b_data);
 	}
 
@@ -5352,8 +5384,8 @@ dbuf_write(dbuf_dirty_record_t *dr, arc_buf_t *data, dmu_tx_t *tx)
 		mutex_enter(&db->db_mtx);
 		dr->dt.dl.dr_override_state = DR_NOT_OVERRIDDEN;
 		zio_write_override(dr->dr_zio, &dr->dt.dl.dr_overridden_by,
-		    dr->dt.dl.dr_copies, dr->dt.dl.dr_nopwrite,
-		    dr->dt.dl.dr_brtwrite);
+		    dr->dt.dl.dr_copies, dr->dt.dl.dr_gang_copies,
+		    dr->dt.dl.dr_nopwrite, dr->dt.dl.dr_brtwrite);
 		mutex_exit(&db->db_mtx);
 	} else if (data == NULL) {
 		ASSERT(zp.zp_checksum == ZIO_CHECKSUM_OFF ||

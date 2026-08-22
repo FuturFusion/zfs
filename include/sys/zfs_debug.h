@@ -60,11 +60,12 @@ extern int zfs_dbgmsg_enable;
 #define	ZFS_DEBUG_METASLAB_ALLOC	(1 << 13)
 #define	ZFS_DEBUG_BRT			(1 << 14)
 #define	ZFS_DEBUG_RAIDZ_RECONSTRUCT	(1 << 15)
+#define	ZFS_DEBUG_DDT			(1 << 16)
 
 extern void __set_error(const char *file, const char *func, int line, int err);
 extern void __zfs_dbgmsg(char *buf);
 extern void __dprintf(boolean_t dprint, const char *file, const char *func,
-    int line, const char *fmt, ...)  __attribute__((format(printf, 5, 6)));
+    int line, const char *fmt, ...)  __attribute__((format(__printf__, 5, 6)));
 
 /*
  * Some general principles for using zfs_dbgmsg():

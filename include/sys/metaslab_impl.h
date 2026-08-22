@@ -197,10 +197,12 @@ struct metaslab_class {
 
 	uint64_t		mc_alloc_groups; /* # of allocatable groups */
 
-	uint64_t		mc_alloc;	/* total allocated space */
-	uint64_t		mc_deferred;	/* total deferred frees */
+	uint64_t		mc_alloc;	/* allocated space */
+	uint64_t		mc_dalloc;	/* deflated allocated space */
+	uint64_t		mc_deferred;	/* deferred frees */
+	uint64_t		mc_ddeferred;	/* deflated deferred frees */
 	uint64_t		mc_space;	/* total space (alloc + free) */
-	uint64_t		mc_dspace;	/* total deflated space */
+	uint64_t		mc_dspace;	/* deflated total space */
 	uint64_t		mc_histogram[ZFS_RANGE_TREE_HISTOGRAM_SIZE];
 
 	/*
@@ -567,6 +569,8 @@ typedef struct metaslab_unflushed_phys {
 	/* on-disk counterpart of ms_unflushed_txg */
 	uint64_t	msp_unflushed_txg;
 } metaslab_unflushed_phys_t;
+
+char *metaslab_rt_name(metaslab_group_t *, metaslab_t *, const char *);
 
 #ifdef	__cplusplus
 }

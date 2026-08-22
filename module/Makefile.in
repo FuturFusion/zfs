@@ -57,6 +57,7 @@ modules-Linux:
 		$(if @KERNEL_LD@,LD=@KERNEL_LD@) $(if @KERNEL_LLVM@,LLVM=@KERNEL_LLVM@) \
 		$(if @KERNEL_CROSS_COMPILE@,CROSS_COMPILE=@KERNEL_CROSS_COMPILE@) \
 		$(if @KERNEL_ARCH@,ARCH=@KERNEL_ARCH@) \
+		$(if @OBJTOOL_DISABLE_WERROR@,objtool=@abs_top_builddir@/scripts/objtool-wrapper) \
 		M="$$PWD" @KERNEL_MAKE@ CONFIG_ZFS=m modules
 
 modules-FreeBSD:
@@ -164,7 +165,8 @@ cppcheck-FreeBSD:
 cppcheck: cppcheck-@ac_system@
 
 distdir:
-	cd @srcdir@ && find . -name '*.[chS]' -exec sh -c 'for f; do mkdir -p $$distdir/$${f%/*}; cp @srcdir@/$$f $$distdir/$$f; done' _ {} +
+	( cd @srcdir@ && find . -name '*.[chS]' ) | \
+	  while read f; do mkdir -p $$distdir/$${f%/*}; cp @srcdir@/$$f $$distdir/$$f; done
 	cp @srcdir@/Makefile.bsd $$distdir/Makefile.bsd
 
 gen-zstd-symbols:

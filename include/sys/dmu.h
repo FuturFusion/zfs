@@ -144,9 +144,9 @@ typedef enum dmu_object_byteswap {
 #define	DMU_OT_IS_DDT(ot) \
 	((ot) == DMU_OT_DDT_ZAP)
 
-#define	DMU_OT_IS_CRITICAL(ot) \
+#define	DMU_OT_IS_CRITICAL(ot, level) \
 	(DMU_OT_IS_METADATA(ot) && \
-	(ot) != DMU_OT_DNODE && \
+	((ot) != DMU_OT_DNODE || (level) > 0) && \
 	(ot) != DMU_OT_DIRECTORY_CONTENTS && \
 	(ot) != DMU_OT_SA)
 
@@ -281,9 +281,30 @@ typedef enum dmu_object_type {
  * the transaction is full. See the comment above dmu_tx_assign() for more
  * details on the meaning of these flags.
  */
-#define	DMU_TX_NOWAIT		(0ULL)
-#define	DMU_TX_WAIT		(1ULL<<0)
-#define	DMU_TX_NOTHROTTLE	(1ULL<<1)
+typedef enum {
+	/*
+	 * If the tx cannot be assigned to a transaction for any reason, do
+	 * not block but return immediately.
+	 */
+	DMU_TX_NOWAIT		= 0,
+
+	/*
+	 * Assign the tx to the open transaction. If the open transaction is
+	 * full, or the write throttle is active, block until the next
+	 * transaction and try again. If the pool suspends while waiting
+	 * and failmode=continue, return an error.
+	 */
+	DMU_TX_WAIT		= (1 << 0),
+
+	/* If the write throttle would prevent the assignment, ignore it. */
+	DMU_TX_NOTHROTTLE	= (1 << 1),
+
+	/*
+	 * With DMU_TX_WAIT, always block if the pool suspends during
+	 * assignment, regardless of the value of the failmode= property.
+	 */
+	DMU_TX_SUSPEND		= (1 << 2),
+} dmu_tx_flag_t;
 
 void byteswap_uint64_array(void *buf, size_t size);
 void byteswap_uint32_array(void *buf, size_t size);
@@ -814,7 +835,7 @@ void dmu_tx_hold_append(dmu_tx_t *tx, uint64_t object, uint64_t off, int len);
 void dmu_tx_hold_append_by_dnode(dmu_tx_t *tx, dnode_t *dn, uint64_t off,
     int len);
 void dmu_tx_hold_clone_by_dnode(dmu_tx_t *tx, dnode_t *dn, uint64_t off,
-    int len);
+    uint64_t len, uint_t blksz);
 void dmu_tx_hold_free(dmu_tx_t *tx, uint64_t object, uint64_t off,
     uint64_t len);
 void dmu_tx_hold_free_by_dnode(dmu_tx_t *tx, dnode_t *dn, uint64_t off,
@@ -828,7 +849,7 @@ void dmu_tx_hold_spill(dmu_tx_t *tx, uint64_t object);
 void dmu_tx_hold_sa(dmu_tx_t *tx, struct sa_handle *hdl, boolean_t may_grow);
 void dmu_tx_hold_sa_create(dmu_tx_t *tx, int total_size);
 void dmu_tx_abort(dmu_tx_t *tx);
-int dmu_tx_assign(dmu_tx_t *tx, uint64_t flags);
+int dmu_tx_assign(dmu_tx_t *tx, dmu_tx_flag_t flags);
 void dmu_tx_wait(dmu_tx_t *tx);
 void dmu_tx_commit(dmu_tx_t *tx);
 void dmu_tx_mark_netfree(dmu_tx_t *tx);
@@ -980,6 +1001,11 @@ void dmu_object_size_from_db(dmu_buf_t *db, uint32_t *blksize,
 
 void dmu_object_dnsize_from_db(dmu_buf_t *db, int *dnsize);
 
+typedef enum {
+	DDS_FLAG_ENCRYPTED = (1<<0),
+	DDS_FLAG_HAS_ENCRYPTED = (1<<7),
+} dmu_objset_flag_t;
+
 typedef struct dmu_objset_stats {
 	uint64_t dds_num_clones; /* number of clones of this */
 	uint64_t dds_creation_txg;
@@ -989,6 +1015,7 @@ typedef struct dmu_objset_stats {
 	uint8_t dds_inconsistent;
 	uint8_t dds_redacted;
 	char dds_origin[ZFS_MAX_DATASET_NAME_LEN];
+	uint8_t dds_flags; /* dmu_objset_flag_t */
 } dmu_objset_stats_t;
 
 /*

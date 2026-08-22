@@ -25,11 +25,11 @@
  * Copyright (c) 2012, 2018 by Delphix. All rights reserved.
  * Copyright (c) 2015 by Chunwei Chen. All rights reserved.
  * Copyright 2017 Nexenta Systems, Inc.
+ * Copyright (c) 2025, Klara, Inc.
  */
 
 /* Portions Copyright 2007 Jeremy Teo */
 /* Portions Copyright 2010 Robert Milkowski */
-
 
 #include <sys/types.h>
 #include <sys/param.h>
@@ -283,6 +283,13 @@ update_pages(znode_t *zp, int64_t start, int len, objset_t *os)
  * When a file is memory mapped, we must keep the I/O data synchronized
  * between the DMU cache and the memory mapped pages.  Preferentially read
  * from memory mapped pages, otherwise fallback to reading through the dmu.
+ *
+ * A run of non-resident pages is read from the DMU in a single call rather
+ * than one call per page.  A page may become resident between the lookup
+ * and the read, but that is safe: zfs_read() holds the rangelock as reader,
+ * so the DMU contents of the range are stable (writes, writeback and
+ * truncation take the writer lock) and a concurrently faulted page is
+ * filled by zfs_getpage() from those same contents.
  */
 int
 mappedread(znode_t *zp, int nbytes, zfs_uio_t *uio)
@@ -328,6 +335,20 @@ mappedread(znode_t *zp, int nbytes, zfs_uio_t *uio)
 			mark_page_accessed(pp);
 			put_page(pp);
 		} else {
+			/*
+			 * Extend the read over any following non-resident
+			 * pages so they are fetched in one DMU call.
+			 */
+			while (bytes < len) {
+				struct page *tp = find_get_page(mp,
+				    (start + PAGE_SIZE) >> PAGE_SHIFT);
+				if (tp != NULL) {
+					put_page(tp);
+					break;
+				}
+				bytes += MIN(PAGE_SIZE, len - bytes);
+				start += PAGE_SIZE;
+			}
 			error = dmu_read_uio_dbuf(sa_get_db(zp->z_sa_hdl),
 			    uio, bytes);
 		}
@@ -2435,9 +2456,13 @@ top:
 	    &zp->z_pflags, sizeof (zp->z_pflags));
 
 	if (attrzp) {
+		/*
+		 * attrzp is zp's hidden xattr directory, so the second
+		 * znode lock acquisition is nested rather than recursive.
+		 */
 		if (mask & (ATTR_UID|ATTR_GID|ATTR_MODE))
-			mutex_enter(&attrzp->z_acl_lock);
-		mutex_enter(&attrzp->z_lock);
+			mutex_enter_nested(&attrzp->z_acl_lock, NESTED_SINGLE);
+		mutex_enter_nested(&attrzp->z_lock, NESTED_SINGLE);
 		SA_ADD_BULK_ATTR(xattr_bulk, xattr_count,
 		    SA_ZPL_FLAGS(zfsvfs), NULL, &attrzp->z_pflags,
 		    sizeof (attrzp->z_pflags));
@@ -3515,7 +3540,8 @@ zfs_link(znode_t *tdzp, znode_t *szp, char *name, cred_t *cr,
 	boolean_t	is_tmpfile = 0;
 	uint64_t	txg;
 
-	is_tmpfile = (sip->i_nlink == 0 && (sip->i_state & I_LINKABLE));
+	is_tmpfile = (sip->i_nlink == 0 &&
+	    (inode_state_read_once(sip) & I_LINKABLE));
 
 	ASSERT(S_ISDIR(ZTOI(tdzp)->i_mode));
 
@@ -3682,23 +3708,12 @@ top:
 }
 
 static void
-zfs_putpage_sync_commit_cb(void *arg)
+zfs_putpage_commit_cb(void *arg)
 {
 	struct page *pp = arg;
 
 	ClearPageError(pp);
 	end_page_writeback(pp);
-}
-
-static void
-zfs_putpage_async_commit_cb(void *arg)
-{
-	struct page *pp = arg;
-	znode_t *zp = ITOZ(pp->mapping->host);
-
-	ClearPageError(pp);
-	end_page_writeback(pp);
-	atomic_dec_32(&zp->z_async_writes_cnt);
 }
 
 /*
@@ -3818,15 +3833,6 @@ zfs_putpage(struct inode *ip, struct page *pp, struct writeback_control *wbc,
 		zfs_rangelock_exit(lr);
 
 		if (wbc->sync_mode != WB_SYNC_NONE) {
-			/*
-			 * Speed up any non-sync page writebacks since
-			 * they may take several seconds to complete.
-			 * Refer to the comment in zpl_fsync() for details.
-			 */
-			if (atomic_load_32(&zp->z_async_writes_cnt) > 0) {
-				zil_commit(zfsvfs->z_log, zp->z_id);
-			}
-
 			if (PageWriteback(pp))
 #ifdef HAVE_PAGEMAP_FOLIO_WAIT_BIT
 				folio_wait_bit(page_folio(pp), PG_writeback);
@@ -3852,8 +3858,6 @@ zfs_putpage(struct inode *ip, struct page *pp, struct writeback_control *wbc,
 	 * was in fact not skipped and should not be counted as if it were.
 	 */
 	wbc->pages_skipped--;
-	if (!for_sync)
-		atomic_inc_32(&zp->z_async_writes_cnt);
 	set_page_writeback(pp);
 	unlock_page(pp);
 
@@ -3872,8 +3876,6 @@ zfs_putpage(struct inode *ip, struct page *pp, struct writeback_control *wbc,
 #endif
 		ClearPageError(pp);
 		end_page_writeback(pp);
-		if (!for_sync)
-			atomic_dec_32(&zp->z_async_writes_cnt);
 		zfs_rangelock_exit(lr);
 		zfs_exit(zfsvfs, FTAG);
 		return (err);
@@ -3899,35 +3901,61 @@ zfs_putpage(struct inode *ip, struct page *pp, struct writeback_control *wbc,
 
 	err = sa_bulk_update(zp->z_sa_hdl, bulk, cnt, tx);
 
-	boolean_t commit = B_FALSE;
-	if (wbc->sync_mode != WB_SYNC_NONE) {
-		/*
-		 * Note that this is rarely called under writepages(), because
-		 * writepages() normally handles the entire commit for
-		 * performance reasons.
-		 */
-		commit = B_TRUE;
-	} else if (!for_sync && atomic_load_32(&zp->z_sync_writes_cnt) > 0) {
-		/*
-		 * If the caller does not intend to wait synchronously
-		 * for this page writeback to complete and there are active
-		 * synchronous calls on this file, do a commit so that
-		 * the latter don't accidentally end up waiting for
-		 * our writeback to complete. Refer to the comment in
-		 * zpl_fsync() (when HAVE_FSYNC_RANGE is defined) for details.
-		 */
-		commit = B_TRUE;
-	}
+	/*
+	 * A note about for_sync vs wbc->sync_mode.
+	 *
+	 * for_sync indicates that this is a syncing writeback, that is, kernel
+	 * caller expects the data to be durably stored before being notified.
+	 * Often, but not always, the call was triggered by a userspace syncing
+	 * op (eg fsync(), msync(MS_SYNC)). For our purposes, for_sync==TRUE
+	 * means that that page should remain "locked" (in the writeback state)
+	 * until it is definitely on disk (ie zil_commit() or spa_sync()).
+	 * Otherwise, we can unlock and return as soon as it is on the
+	 * in-memory ZIL.
+	 *
+	 * wbc->sync_mode has similar meaning. wbc is passed from the kernel to
+	 * zpl_writepages()/zpl_writepage(); wbc->sync_mode==WB_SYNC_NONE
+	 * indicates this a regular async writeback (eg a cache eviction) and
+	 * so does not need a durability guarantee, while WB_SYNC_ALL indicates
+	 * a syncing op that must be waited on (by convention, we test for
+	 * !WB_SYNC_NONE rather than WB_SYNC_ALL, to prefer durability over
+	 * performance should there ever be a new mode that we have not yet
+	 * added support for).
+	 *
+	 * So, why a separate for_sync field? This is because zpl_writepages()
+	 * calls zfs_putpage() multiple times for a single "logical" operation.
+	 * It wants all the individual pages to be for_sync==TRUE ie only
+	 * unlocked once durably stored, but it only wants one call to
+	 * zil_commit() at the very end, once all the pages are synced. So,
+	 * it repurposes sync_mode slightly to indicate who issue and wait for
+	 * the IO: for NONE, the caller to zfs_putpage() will do it, while for
+	 * ALL, zfs_putpage should do it.
+	 *
+	 * Summary:
+	 *   for_sync:  0=unlock immediately; 1 unlock once on disk
+	 *   sync_mode: NONE=caller will commit; ALL=we will commit
+	 */
+	boolean_t need_commit = (wbc->sync_mode != WB_SYNC_NONE);
 
-	zfs_log_write(zfsvfs->z_log, tx, TX_WRITE, zp, pgoff, pglen, commit,
-	    B_FALSE, for_sync ? zfs_putpage_sync_commit_cb :
-	    zfs_putpage_async_commit_cb, pp);
+	/*
+	 * We use for_sync as the "commit" arg to zfs_log_write() (arg 7)
+	 * because it is a policy flag that indicates "someone will call
+	 * zil_commit() soon". for_sync=TRUE means exactly that; the only
+	 * question is whether it will be us, or zpl_writepages().
+	 */
+	zfs_log_write(zfsvfs->z_log, tx, TX_WRITE, zp, pgoff, pglen, for_sync,
+	    B_FALSE, for_sync ? zfs_putpage_commit_cb : NULL, pp);
+
+	if (!for_sync) {
+		ClearPageError(pp);
+		end_page_writeback(pp);
+	}
 
 	dmu_tx_commit(tx);
 
 	zfs_rangelock_exit(lr);
 
-	if (commit)
+	if (need_commit)
 		zil_commit(zfsvfs->z_log, zp->z_id);
 
 	dataset_kstats_update_write_kstats(&zfsvfs->z_kstat, pglen);
@@ -4016,18 +4044,32 @@ zfs_inactive(struct inode *ip)
 {
 	znode_t	*zp = ITOZ(ip);
 	zfsvfs_t *zfsvfs = ITOZSB(ip);
+	krwlock_t *zti_lock = &zfsvfs->z_teardown_inactive_lock;
 	uint64_t atime[2];
 	int error;
 	int need_unlock = 0;
+	boolean_t no_lockdep = B_FALSE;
 
 	/* Only read lock if we haven't already write locked, e.g. rollback */
-	if (!RW_WRITE_HELD(&zfsvfs->z_teardown_inactive_lock)) {
+	if (!RW_WRITE_HELD(zti_lock)) {
 		need_unlock = 1;
-		rw_enter(&zfsvfs->z_teardown_inactive_lock, RW_READER);
+		/*
+		 * kswapd reaches evict_inode() with fs_reclaim held.  Suppress
+		 * lockdep only for this reclaim-thread acquire/release pair.
+		 */
+		no_lockdep = current_is_reclaim_thread();
+		if (no_lockdep)
+			rw_enter_nolockdep(zti_lock, RW_READER);
+		else
+			rw_enter(zti_lock, RW_READER);
 	}
 	if (zp->z_sa_hdl == NULL) {
-		if (need_unlock)
-			rw_exit(&zfsvfs->z_teardown_inactive_lock);
+		if (need_unlock) {
+			if (no_lockdep)
+				rw_exit_nolockdep(zti_lock);
+			else
+				rw_exit(zti_lock);
+		}
 		return;
 	}
 
@@ -4053,8 +4095,12 @@ zfs_inactive(struct inode *ip)
 	}
 
 	zfs_zinactive(zp);
-	if (need_unlock)
-		rw_exit(&zfsvfs->z_teardown_inactive_lock);
+	if (need_unlock) {
+		if (no_lockdep)
+			rw_exit_nolockdep(zti_lock);
+		else
+			rw_exit(zti_lock);
+	}
 }
 
 /*
@@ -4069,7 +4115,18 @@ zfs_fillpage(struct inode *ip, struct page *pp)
 	u_offset_t io_off = page_offset(pp);
 	size_t io_len = PAGE_SIZE;
 
-	ASSERT3U(io_off, <, i_size);
+	/*
+	 * The page may be faulted in after the file has been truncated.
+	 * There is no data to read; just zero-fill the page.
+	 */
+	if (io_off >= i_size) {
+		void *zva = kmap(pp);
+		memset(zva, 0, PAGE_SIZE);
+		kunmap(pp);
+		ClearPageError(pp);
+		SetPageUptodate(pp);
+		return (0);
+	}
 
 	if (io_off + io_len > i_size)
 		io_len = i_size - io_off;
@@ -4120,9 +4177,14 @@ zfs_getpage(struct inode *ip, struct page *pp)
 	if ((error = zfs_enter_verify_zp(zfsvfs, zp, FTAG)) != 0)
 		return (error);
 
-	ASSERT3U(io_off, <, i_size);
-
-	if (io_off + io_len > i_size)
+	/*
+	 * If the page lies entirely at or beyond EOF (e.g. it raced a
+	 * truncate) just lock the page and let zfs_fillpage() re-check
+	 * i_size under the range lock and zero-fill it.
+	 */
+	if (io_off >= i_size)
+		io_len = PAGE_SIZE;
+	else if (io_off + io_len > i_size)
 		io_len = i_size - io_off;
 
 	/*

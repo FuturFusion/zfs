@@ -1844,7 +1844,7 @@ send_reader_thread(void *arg)
 				continue;
 			}
 			uint64_t file_max =
-			    MIN(dn->dn_maxblkid, range->end_blkid);
+			    MIN(dn->dn_maxblkid + 1, range->end_blkid);
 			/*
 			 * The object exists, so we need to try to find the
 			 * blkptr for each block in the range we're processing.
@@ -2687,8 +2687,8 @@ dmu_send_obj(const char *pool, uint64_t tosnap, uint64_t fromsnap,
 	}
 
 	if (fromsnap != 0) {
-		err = dsl_dataset_hold_obj_flags(dspp.dp, fromsnap, dsflags,
-		    FTAG, &fromds);
+		err = dsl_dataset_hold_obj(dspp.dp, fromsnap, FTAG, &fromds);
+
 		if (err != 0) {
 			dsl_dataset_rele_flags(dspp.to_ds, dsflags, FTAG);
 			dsl_pool_rele(dspp.dp, FTAG);
@@ -2740,7 +2740,7 @@ dmu_send_obj(const char *pool, uint64_t tosnap, uint64_t fromsnap,
 		kmem_free(dspp.fromredactsnaps,
 		    dspp.numfromredactsnaps * sizeof (uint64_t));
 
-	dsl_dataset_rele(dspp.to_ds, FTAG);
+	dsl_dataset_rele_flags(dspp.to_ds, dsflags, FTAG);
 	return (err);
 }
 

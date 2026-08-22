@@ -30,7 +30,6 @@
 
 verify_runnable "both"
 
-verify_block_cloning
 verify_crossfs_block_cloning
 
 log_assert "Verify various corner cases in block cloning across datasets"
@@ -42,5 +41,8 @@ log_must zfs set compress=off $TESTDSTFS
 log_must zfs set recordsize=$RECORDSIZE $TESTDSTFS
 
 bclone_corner_cases_test $TESTSRCDIR $TESTDSTDIR
+
+sync_pool $TESTPOOL
+log_must zdb -b $TESTPOOL
 
 log_pass

@@ -556,7 +556,7 @@ zvol_replay_clone_range(void *arg1, void *arg2, boolean_t byteswap)
 	if (error != 0 || !zv->zv_dn)
 		return (error);
 	tx = dmu_tx_create(os);
-	dmu_tx_hold_clone_by_dnode(tx, zv->zv_dn, off, len);
+	dmu_tx_hold_clone_by_dnode(tx, zv->zv_dn, off, len, blksz);
 	error = dmu_tx_assign(tx, DMU_TX_WAIT);
 	if (error != 0) {
 		dmu_tx_abort(tx);
@@ -625,10 +625,26 @@ zvol_clone_range(zvol_state_t *zv_src, uint64_t inoff, zvol_state_t *zv_dst,
 		error = EXDEV;
 		goto out;
 	}
+
+	/*
+	 * Block cloning from an unencrypted dataset into an encrypted
+	 * dataset and vice versa is not supported.
+	 */
 	if (inos->os_encrypted != outos->os_encrypted) {
 		error = EXDEV;
 		goto out;
 	}
+
+	/*
+	 * Cloning across encrypted datasets is possible only if they
+	 * share the same master key.
+	 */
+	if (inos != outos && inos->os_encrypted &&
+	    !dmu_objset_crypto_key_equal(inos, outos)) {
+		error = SET_ERROR(EXDEV);
+		goto out;
+	}
+
 	if (zv_src->zv_volblocksize != zv_dst->zv_volblocksize) {
 		error = EINVAL;
 		goto out;
@@ -721,7 +737,8 @@ zvol_clone_range(zvol_state_t *zv_src, uint64_t inoff, zvol_state_t *zv_dst,
 		}
 
 		tx = dmu_tx_create(zv_dst->zv_objset);
-		dmu_tx_hold_clone_by_dnode(tx, zv_dst->zv_dn, outoff, size);
+		dmu_tx_hold_clone_by_dnode(tx, zv_dst->zv_dn, outoff, size,
+		    zv_src->zv_volblocksize);
 		error = dmu_tx_assign(tx, DMU_TX_WAIT);
 		if (error != 0) {
 			dmu_tx_abort(tx);
@@ -851,7 +868,7 @@ zvol_log_write(zvol_state_t *zv, dmu_tx_t *tx, uint64_t offset,
 	uint32_t blocksize = zv->zv_volblocksize;
 	zilog_t *zilog = zv->zv_zilog;
 	itx_wr_state_t write_state;
-	uint64_t sz = size;
+	uint64_t log_size = 0;
 
 	if (zil_replaying(zilog, tx))
 		return;
@@ -888,6 +905,10 @@ zvol_log_write(zvol_state_t *zv, dmu_tx_t *tx, uint64_t offset,
 			wr_state = WR_NEED_COPY;
 		}
 
+		log_size += itx->itx_size;
+		if (wr_state == WR_NEED_COPY)
+			log_size += len;
+
 		itx->itx_wr_state = wr_state;
 		lr->lr_foid = ZVOL_OBJ;
 		lr->lr_offset = offset;
@@ -903,9 +924,7 @@ zvol_log_write(zvol_state_t *zv, dmu_tx_t *tx, uint64_t offset,
 		size -= len;
 	}
 
-	if (write_state == WR_COPIED || write_state == WR_NEED_COPY) {
-		dsl_pool_wrlog_count(zilog->zl_dmu_pool, sz, tx->tx_txg);
-	}
+	dsl_pool_wrlog_count(zilog->zl_dmu_pool, log_size, tx->tx_txg);
 }
 
 /*

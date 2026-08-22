@@ -46,10 +46,6 @@
 
 verify_runnable "global"
 
-if is_linux && [[ $(linux_version) -lt $(linux_version "4.5") ]]; then
-  log_unsupported "copy_file_range not available before Linux 4.5"
-fi
-
 VDIR=$TEST_BASE_DIR/disk-bclone
 VDEV="$VDIR/a $VDIR/b $VDIR/c"
 LDEV="$VDIR/e $VDIR/f"
@@ -86,6 +82,9 @@ log_must have_same_content /$TESTPOOL/$TESTFS/file1 /$TESTPOOL/$TESTFS/file2
 typeset blocks=$(get_same_blocks $TESTPOOL/$TESTFS file1 $TESTPOOL/$TESTFS file2)
 # FreeBSD's seq(1) leaves a trailing space, remove it with sed(1).
 log_must [ "$blocks" = "$(seq -s " " 0 1021 | sed 's/ $//')" ]
+
+sync_pool $TESTPOOL
+log_must zdb -b $TESTPOOL
 
 log_pass "LWB buffer overflow is not triggered with multiple VDEVs ZIL"
 

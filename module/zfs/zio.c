@@ -1415,8 +1415,8 @@ zio_rewrite(zio_t *pio, spa_t *spa, uint64_t txg, blkptr_t *bp, abd_t *data,
 }
 
 void
-zio_write_override(zio_t *zio, blkptr_t *bp, int copies, boolean_t nopwrite,
-    boolean_t brtwrite)
+zio_write_override(zio_t *zio, blkptr_t *bp, int copies, int gang_copies,
+    boolean_t nopwrite, boolean_t brtwrite)
 {
 	ASSERT(zio->io_type == ZIO_TYPE_WRITE);
 	ASSERT(zio->io_child_type == ZIO_CHILD_LOGICAL);
@@ -1433,6 +1433,7 @@ zio_write_override(zio_t *zio, blkptr_t *bp, int copies, boolean_t nopwrite,
 	zio->io_prop.zp_nopwrite = nopwrite;
 	zio->io_prop.zp_brtwrite = brtwrite;
 	zio->io_prop.zp_copies = copies;
+	zio->io_prop.zp_gang_copies = gang_copies;
 	zio->io_bp_override = bp;
 }
 
@@ -1687,9 +1688,11 @@ zio_vdev_child_io(zio_t *pio, blkptr_t *bp, vdev_t *vd, uint64_t offset,
 
 	/*
 	 * If we've decided to do a repair, the write is not speculative --
-	 * even if the original read was.
+	 * even if the original read was. Rebuild is an exception since we
+	 * cannot always ensure its data integrity.
 	 */
-	if (flags & ZIO_FLAG_IO_REPAIR)
+	if ((flags & ZIO_FLAG_IO_REPAIR) &&
+	    pio->io_priority != ZIO_PRIORITY_REBUILD)
 		flags &= ~ZIO_FLAG_SPECULATIVE;
 
 	/*
@@ -1753,6 +1756,15 @@ zio_flush(zio_t *pio, vdev_t *vd)
 		return;
 
 	if (vd->vdev_children == 0) {
+		/*
+		 * A non-concrete vdev (a hole or indirect vdev left behind
+		 * by removing a log or data device) has no leaf device to
+		 * flush.  Skip it; issuing a flush to an indirect vdev would
+		 * trip the ZIO_TYPE_WRITE assertion in
+		 * vdev_indirect_io_start().
+		 */
+		if (!vdev_is_concrete(vd))
+			return;
 		zio_nowait(zio_create(pio, vd->vdev_spa, 0, NULL, NULL, 0, 0,
 		    NULL, NULL, ZIO_TYPE_FLUSH, ZIO_PRIORITY_NOW, flags, vd, 0,
 		    NULL, ZIO_STAGE_OPEN, ZIO_FLUSH_PIPELINE));
@@ -2006,8 +2018,7 @@ zio_write_compress(zio_t *zio)
 			compress = ZIO_COMPRESS_OFF;
 			if (cabd != NULL)
 				abd_free(cabd);
-		} else if (!zp->zp_dedup && !zp->zp_encrypt &&
-		    psize <= BPE_PAYLOAD_SIZE &&
+		} else if (psize <= BPE_PAYLOAD_SIZE && !zp->zp_encrypt &&
 		    zp->zp_level == 0 && !DMU_OT_HAS_FILL(zp->zp_type) &&
 		    spa_feature_is_enabled(spa, SPA_FEATURE_EMBEDDED_DATA)) {
 			void *cbuf = abd_borrow_buf_copy(cabd, lsize);
@@ -2303,12 +2314,12 @@ zio_deadman_impl(zio_t *pio, int ziodepth)
 	zio_t *cio, *cio_next;
 	zio_link_t *zl = NULL;
 	vdev_t *vd = pio->io_vd;
+	uint64_t failmode = spa_get_deadman_failmode(pio->io_spa);
 
 	if (zio_deadman_log_all || (vd != NULL && vd->vdev_ops->vdev_op_leaf)) {
 		vdev_queue_t *vq = vd ? &vd->vdev_queue : NULL;
 		zbookmark_phys_t *zb = &pio->io_bookmark;
 		uint64_t delta = gethrtime() - pio->io_timestamp;
-		uint64_t failmode = spa_get_deadman_failmode(pio->io_spa);
 
 		zfs_dbgmsg("slow zio[%d]: zio=%px timestamp=%llu "
 		    "delta=%llu queued=%llu io=%llu "
@@ -2332,11 +2343,15 @@ zio_deadman_impl(zio_t *pio, int ziodepth)
 		    pio->io_error);
 		(void) zfs_ereport_post(FM_EREPORT_ZFS_DEADMAN,
 		    pio->io_spa, vd, zb, pio, 0);
+	}
 
-		if (failmode == ZIO_FAILURE_MODE_CONTINUE &&
-		    taskq_empty_ent(&pio->io_tqent)) {
-			zio_interrupt(pio);
-		}
+	if (vd != NULL && vd->vdev_ops->vdev_op_leaf &&
+	    list_is_empty(&pio->io_child_list) &&
+	    failmode == ZIO_FAILURE_MODE_CONTINUE &&
+	    taskq_empty_ent(&pio->io_tqent) &&
+	    pio->io_queue_state == ZIO_QS_ACTIVE) {
+		pio->io_error = EINTR;
+		zio_interrupt(pio);
 	}
 
 	mutex_enter(&pio->io_lock);
@@ -2710,6 +2725,8 @@ zio_suspend(spa_t *spa, zio_t *zio, zio_suspend_reason_t reason)
 	}
 
 	mutex_exit(&spa->spa_suspend_lock);
+
+	txg_wait_kick(spa->spa_dsl_pool);
 }
 
 int
@@ -3141,15 +3158,13 @@ zio_write_gang_block(zio_t *pio, metaslab_class_t *mc)
 	boolean_t has_data = !(pio->io_flags & ZIO_FLAG_NODATA);
 
 	/*
-	 * If one copy was requested, store 2 copies of the GBH, so that we
-	 * can still traverse all the data (e.g. to free or scrub) even if a
-	 * block is damaged.  Note that we can't store 3 copies of the GBH in
-	 * all cases, e.g. with encryption, which uses DVA[2] for the IV+salt.
+	 * Store multiple copies of the GBH, so that we can still traverse
+	 * all the data (e.g. to free or scrub) even if a block is damaged.
+	 * This value respects the redundant_metadata property.
 	 */
-	int gbh_copies = copies;
-	if (gbh_copies == 1) {
-		gbh_copies = MIN(2, spa_max_replication(spa));
-	}
+	int gbh_copies = gio->io_prop.zp_gang_copies;
+	ASSERT3S(gbh_copies, >, 0);
+	ASSERT3S(gbh_copies, <=, SPA_DVAS_PER_BP);
 
 	ASSERT(ZIO_HAS_ALLOCATOR(pio));
 	int flags = METASLAB_HINTBP_FAVOR | METASLAB_GANG_HEADER;
@@ -3169,6 +3184,7 @@ zio_write_gang_block(zio_t *pio, metaslab_class_t *mc)
 		 * since metaslab_class_throttle_reserve() always allows
 		 * additional reservations for gang blocks.
 		 */
+		ASSERT3U(gbh_copies, >=, copies);
 		VERIFY(metaslab_class_throttle_reserve(mc, gbh_copies - copies,
 		    pio->io_allocator, pio, flags));
 	}
@@ -3231,6 +3247,7 @@ zio_write_gang_block(zio_t *pio, metaslab_class_t *mc)
 		zp.zp_type = zp.zp_storage_type = DMU_OT_NONE;
 		zp.zp_level = 0;
 		zp.zp_copies = gio->io_prop.zp_copies;
+		zp.zp_gang_copies = gio->io_prop.zp_gang_copies;
 		zp.zp_dedup = B_FALSE;
 		zp.zp_dedup_verify = B_FALSE;
 		zp.zp_nopwrite = B_FALSE;
@@ -3951,7 +3968,7 @@ zio_ddt_write(zio_t *zio)
 	 * grow the DDT entry by to satisfy the request.
 	 */
 	zio_prop_t czp = *zp;
-	czp.zp_copies = need_dvas;
+	czp.zp_copies = czp.zp_gang_copies = need_dvas;
 	zio_t *cio = zio_write(zio, spa, txg, bp, zio->io_orig_abd,
 	    zio->io_orig_size, zio->io_orig_size, &czp,
 	    zio_ddt_child_write_ready, NULL,
@@ -4006,17 +4023,35 @@ zio_ddt_free(zio_t *zio)
 		ddt_phys_variant_t v = ddt_phys_select(ddt, dde, bp);
 		if (v != DDT_PHYS_NONE)
 			ddt_phys_decref(dde->dde_phys, v);
+		else
+			/*
+			 * If the entry was found but the phys was not, then
+			 * this block must have been pruned from the dedup
+			 * table, and the entry refers to a later version of
+			 * this data. Therefore, the caller is trying to delete
+			 * the only stored instance of this block, and so we
+			 * need to do a normal (not dedup) free. Clear dde so
+			 * we fall into the block below.
+			 */
+			dde = NULL;
 	}
 	ddt_exit(ddt);
 
-	/*
-	 * When no entry was found, it must have been pruned,
-	 * so we can free it now instead of decrementing the
-	 * refcount in the DDT.
-	 */
-	if (!dde) {
+	if (dde) {
+		/*
+		 * DDT entry found and the refcount has been decremented.
+		 * Stop the pipeline — there is nothing more to do right now.
+		 */
+		zio->io_pipeline = ZIO_INTERLOCK_PIPELINE;
+	} else {
+		/*
+		 * No DDT entry; the block must have been pruned from the
+		 * table.  Clear the DEDUP bit so it is treated as a normal
+		 * block from here on.  BRT_FREE and DVA_FREE follow in the
+		 * pipeline and will handle any cloned references and the
+		 * actual block free respectively.
+		 */
 		BP_SET_DEDUP(bp, 0);
-		zio->io_pipeline |= ZIO_STAGE_DVA_FREE;
 	}
 
 	return (zio);
@@ -5072,16 +5107,18 @@ zio_dio_chksum_verify_error_report(zio_t *zio)
 		 */
 		zio->io_error = SET_ERROR(EIO);
 		/*
-		 * Report dio_verify_wr ZED event.
+		 * Report dio_verify_wr ZED event, rate limited.
 		 */
-		(void) zfs_ereport_post(FM_EREPORT_ZFS_DIO_VERIFY_WR,
-		    zio->io_spa,  zio->io_vd, &zio->io_bookmark, zio, 0);
+		if (zfs_ratelimit(&zio->io_vd->vdev_dio_verify_rl))
+			(void) zfs_ereport_post(FM_EREPORT_ZFS_DIO_VERIFY_WR,
+			    zio->io_spa, zio->io_vd, &zio->io_bookmark, zio, 0);
 	} else {
 		/*
-		 * Report dio_verify_rd ZED event.
+		 * Report dio_verify_rd ZED event, rate limited.
 		 */
-		(void) zfs_ereport_post(FM_EREPORT_ZFS_DIO_VERIFY_RD,
-		    zio->io_spa, zio->io_vd, &zio->io_bookmark, zio, 0);
+		if (zfs_ratelimit(&zio->io_vd->vdev_dio_verify_rl))
+			(void) zfs_ereport_post(FM_EREPORT_ZFS_DIO_VERIFY_RD,
+			    zio->io_spa, zio->io_vd, &zio->io_bookmark, zio, 0);
 	}
 }
 
@@ -5646,11 +5683,11 @@ static zio_pipe_stage_t *zio_pipeline[] = {
 	zio_encrypt,
 	zio_checksum_generate,
 	zio_nop_write,
-	zio_brt_free,
 	zio_ddt_read_start,
 	zio_ddt_read_done,
 	zio_ddt_write,
 	zio_ddt_free,
+	zio_brt_free,
 	zio_gang_assemble,
 	zio_gang_issue,
 	zio_dva_throttle,
@@ -5709,6 +5746,67 @@ zbookmark_compare(uint16_t dbss1, uint8_t ibs1, uint16_t dbss2, uint8_t ibs2,
 	    zb1->zb_level == zb2->zb_level &&
 	    zb1->zb_blkid == zb2->zb_blkid)
 		return (0);
+
+	if (zb1->zb_level < 0 || zb2->zb_level < 0) {
+		/*
+		 * "Negative" levels are ZB_ROOT_LEVEL, ZB_ZIL_LEVEL or
+		 * ZB_DNODE_LEVEL, and represent some sort of auxiliary dataset
+		 * block or object. In this case, we're usually being called
+		 * from dsl_scan or dmu_traverse.
+		 *
+		 * These "levels" are more like a "type" signal, not directly
+		 * comparable, but we have to do something. So we order them in
+		 * the order we would see them during a typical scan or
+		 * traverse:
+		 *
+		 * - ZB_ROOT_LEVEL: the "top" block carrying the dataset head
+		 * - ZB_ZIL_LEVEL: the head ZIL block attached to the dataset
+		 * - ZB_DNODE_LEVEL: "virtual" position representing an
+		 *                   entire object. Sorts ahead of the true
+		 *                   data blocks for the object.
+		 * - level >= 0: data blocks
+		 *
+		 * We work through these cases from top to bottom, with
+		 * appropriate tiebreaks for each kind.
+		 */
+
+		/*
+		 * Root level wins. It shouldn't be possible for both to be the
+		 * root level in this per-dataset tree, and there's no obvious
+		 * tiebreaker, but we handle it as a defensive measure.
+		 */
+		if (zb1->zb_level == ZB_ROOT_LEVEL &&
+		    zb2->zb_level == ZB_ROOT_LEVEL)
+			return (TREE_PCMP(zb1, zb2));
+		if (zb1->zb_level == ZB_ROOT_LEVEL)
+			return (-1);
+		if (zb2->zb_level == ZB_ROOT_LEVEL)
+			return (1);
+
+		/* ZIL bookmarks have valid blkid, so the earlier one wins. */
+		if (zb1->zb_level == ZB_ZIL_LEVEL &&
+		    zb2->zb_level == ZB_ZIL_LEVEL)
+			return (TREE_CMP(zb1->zb_blkid, zb2->zb_blkid));
+		if (zb1->zb_level == ZB_ZIL_LEVEL)
+			return (-1);
+		if (zb2->zb_level == ZB_ZIL_LEVEL)
+			return (1);
+
+		/*
+		 * If we get this far, then at least one is ZB_DNODE_LEVEL, and
+		 * the other is either ZB_DNODE_LEVEL or a data block.
+		 * Regardless, the one with the lower-numbered object wins -
+		 * earler ZB_DNODE_LEVEL beats later, but data block on earlier
+		 * objects beats the virtual marker on later objects.
+		 */
+		int cmp = TREE_CMP(zb1->zb_object, zb2->zb_object);
+		if (cmp != 0)
+			return (cmp);
+
+		if (zb1->zb_level == ZB_DNODE_LEVEL)
+			return (-1);
+		return (1);
+	}
 
 	IMPLY(zb1->zb_level > 0, ibs1 >= SPA_MINBLOCKSHIFT);
 	IMPLY(zb2->zb_level > 0, ibs2 >= SPA_MINBLOCKSHIFT);

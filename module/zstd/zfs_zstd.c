@@ -669,6 +669,15 @@ zfs_zstd_decompress_level_buf(void *s_start, void *d_start, size_t s_len,
 		return (1);
 	}
 
+	/*
+	 * An OpenZFS compressed block must expand to exactly d_len bytes.
+	 * ZSTD_decompressDCtx returns the decompressed size on success.
+	 */
+	if (result != d_len) {
+		ZSTDSTAT_BUMP(zstd_stat_dec_fail);
+		return (1);
+	}
+
 	if (level) {
 		*level = curlevel;
 	}
@@ -796,9 +805,9 @@ static void __init
 zstd_mempool_init(void)
 {
 	zstd_mempool_cctx =
-	    kmem_zalloc(ZSTD_POOL_MAX * sizeof (struct zstd_pool), KM_SLEEP);
+	    vmem_zalloc(ZSTD_POOL_MAX * sizeof (struct zstd_pool), KM_SLEEP);
 	zstd_mempool_dctx =
-	    kmem_zalloc(ZSTD_POOL_MAX * sizeof (struct zstd_pool), KM_SLEEP);
+	    vmem_zalloc(ZSTD_POOL_MAX * sizeof (struct zstd_pool), KM_SLEEP);
 
 	for (int i = 0; i < ZSTD_POOL_MAX; i++) {
 		mutex_init(&zstd_mempool_cctx[i].barrier, NULL,
@@ -844,8 +853,8 @@ zstd_mempool_deinit(void)
 		release_pool(&zstd_mempool_dctx[i]);
 	}
 
-	kmem_free(zstd_mempool_dctx, ZSTD_POOL_MAX * sizeof (struct zstd_pool));
-	kmem_free(zstd_mempool_cctx, ZSTD_POOL_MAX * sizeof (struct zstd_pool));
+	vmem_free(zstd_mempool_dctx, ZSTD_POOL_MAX * sizeof (struct zstd_pool));
+	vmem_free(zstd_mempool_cctx, ZSTD_POOL_MAX * sizeof (struct zstd_pool));
 	zstd_mempool_dctx = NULL;
 	zstd_mempool_cctx = NULL;
 }

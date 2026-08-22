@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: CDDL-1.0
 libspldir = $(includedir)/libspl
 libspl_HEADERS = \
 	%D%/assert.h \
@@ -24,6 +25,8 @@ libspl_rpc_HEADERS = \
 
 libspl_sysdir = $(libspldir)/sys
 libspl_sys_HEADERS = \
+	%D%/sys/abd_os.h \
+	%D%/sys/abd_impl_os.h \
 	%D%/sys/acl.h \
 	%D%/sys/acl_impl.h \
 	%D%/sys/asm_linkage.h \
@@ -74,6 +77,7 @@ libspl_sys_HEADERS += \
 	%D%/os/linux/sys/param.h \
 	%D%/os/linux/sys/stat.h \
 	%D%/os/linux/sys/sysmacros.h \
+	%D%/os/linux/sys/vfs.h \
 	%D%/os/linux/sys/zfs_context_os.h
 
 libspl_ia32_HEADERS = \

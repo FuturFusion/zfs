@@ -1,5 +1,4 @@
-include $(srcdir)/%D%/include/Makefile.am
-
+# SPDX-License-Identifier: CDDL-1.0
 libzpool_la_CFLAGS  = $(AM_CFLAGS) $(KERNEL_CFLAGS) $(LIBRARY_CFLAGS)
 libzpool_la_CFLAGS += $(ZLIB_CFLAGS)
 

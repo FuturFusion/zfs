@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later WITH Autoconf-exception-macro
 # ===========================================================================
 #     https://www.gnu.org/software/autoconf-archive/ax_python_devel.html
 # ===========================================================================
@@ -72,7 +73,7 @@
 #   modified version of the Autoconf Macro, you may extend this special
 #   exception to the GPL to apply to your modified version as well.
 
-#serial 36
+#serial 37
 
 AU_ALIAS([AC_PYTHON_DEVEL], [AX_PYTHON_DEVEL])
 AC_DEFUN([AX_PYTHON_DEVEL],[
@@ -316,7 +317,7 @@ EOD`
 			PYTHON_LIBS="-L$ac_python_libdir -lpython$ac_python_version"
 		fi
 
-		if test -z "PYTHON_LIBS"; then
+		if test -z "$PYTHON_LIBS"; then
 			AC_MSG_WARN([
   Cannot determine location of your Python DSO. Please check it was installed with
   dynamic libraries enabled, or try setting PYTHON_LIBS by hand.

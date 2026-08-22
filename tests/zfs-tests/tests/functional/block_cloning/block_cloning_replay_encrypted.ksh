@@ -43,10 +43,6 @@
 
 verify_runnable "global"
 
-if is_linux && [[ $(linux_version) -lt $(linux_version "4.5") ]]; then
-  log_unsupported "copy_file_range not available before Linux 4.5"
-fi
-
 export VDIR=$TEST_BASE_DIR/disk-bclone
 export VDEV="$VDIR/a $VDIR/b $VDIR/c"
 export LDEV="$VDIR/e $VDIR/f"
@@ -131,5 +127,8 @@ typeset blocks=$(get_same_blocks $TESTPOOL/$TESTFS file2 \
 	$TESTPOOL/$TESTFS clone2 $PASSPHRASE)
 # FreeBSD's seq(1) leaves a trailing space, remove it with sed(1).
 log_must [ "$blocks" = "$(seq -s " " 0 2047 | sed 's/ $//')" ]
+
+sync_pool $TESTPOOL
+log_must zdb -b $TESTPOOL
 
 log_pass $claim

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: CDDL-1.0
 dist_noinst_man_MANS = \
 	%D%/man1/cstyle.1
 
@@ -50,6 +51,7 @@ dist_man_MANS = \
 	%D%/man8/zfs-redact.8 \
 	%D%/man8/zfs-release.8 \
 	%D%/man8/zfs-rename.8 \
+	%D%/man8/zfs-rewrite.8 \
 	%D%/man8/zfs-rollback.8 \
 	%D%/man8/zfs-send.8 \
 	%D%/man8/zfs-set.8 \

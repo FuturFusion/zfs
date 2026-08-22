@@ -25,6 +25,7 @@
  * Copyright (c) 2011, 2020 by Delphix. All rights reserved.
  * Copyright (c) 2017, Intel Corporation.
  * Copyright (c) 2019, Datto Inc. All rights reserved.
+ * Copyright (c) 2026, TrueNAS.
  */
 
 #ifndef _SYS_VDEV_H
@@ -54,11 +55,12 @@ extern int zfs_nocacheflush;
 typedef boolean_t vdev_open_children_func_t(vdev_t *vd);
 
 extern void vdev_dbgmsg(vdev_t *vd, const char *fmt, ...)
-    __attribute__((format(printf, 2, 3)));
+    __attribute__((format(__printf__, 2, 3)));
 extern void vdev_dbgmsg_print_tree(vdev_t *, int);
-extern int vdev_open(vdev_t *);
-extern void vdev_open_children(vdev_t *);
-extern void vdev_open_children_subset(vdev_t *, vdev_open_children_func_t *);
+extern int vdev_open(vdev_t *, cred_t *);
+extern void vdev_open_children(vdev_t *, cred_t *);
+extern void vdev_open_children_subset(vdev_t *, cred_t *,
+    vdev_open_children_func_t *);
 extern int vdev_validate(vdev_t *);
 extern int vdev_copy_path_strict(vdev_t *, vdev_t *);
 extern void vdev_copy_path_relaxed(vdev_t *, vdev_t *);
@@ -173,6 +175,7 @@ extern void vdev_queue_change_io_priority(zio_t *zio, zio_priority_t priority);
 extern uint32_t vdev_queue_length(vdev_t *vd);
 extern uint64_t vdev_queue_last_offset(vdev_t *vd);
 extern uint64_t vdev_queue_class_length(vdev_t *vq, zio_priority_t p);
+extern boolean_t vdev_queue_pool_busy(spa_t *spa);
 
 extern void vdev_config_dirty(vdev_t *vd);
 extern void vdev_config_clean(vdev_t *vd);
@@ -211,6 +214,8 @@ extern void vdev_label_write(zio_t *zio, vdev_t *vd, int l, abd_t *buf, uint64_t
 extern int vdev_label_read_bootenv(vdev_t *, nvlist_t *);
 extern int vdev_label_write_bootenv(vdev_t *, nvlist_t *);
 extern int vdev_uberblock_sync_list(vdev_t **, int, struct uberblock *, int);
+extern int vdev_uberblock_compare(const struct uberblock *,
+    const struct uberblock *);
 extern int vdev_check_boot_reserve(spa_t *, vdev_t *);
 
 typedef enum {

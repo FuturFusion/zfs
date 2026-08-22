@@ -785,6 +785,12 @@ zpool_standard_error_fmt(libzfs_handle_t *hdl, int error, const char *fmt, ...)
 	return (-1);
 }
 
+int
+zfs_ioctl(libzfs_handle_t *hdl, int request, zfs_cmd_t *zc)
+{
+	return (lzc_ioctl_fd(hdl->libzfs_fd, request, zc));
+}
+
 /*
  * Display an out of memory error message and abort the current program.
  */
@@ -2388,6 +2394,8 @@ zpool_prepare_disk(zpool_handle_t *zhp, nvlist_t *vdev_nv,
 	    &enc_sysfs_path);
 
 	upath = zfs_get_underlying_path(path);
+	if (upath == NULL && path != NULL)
+		upath = strdup(path);
 	pool_name = zhp ? zpool_get_name(zhp) : NULL;
 
 	env = zpool_vdev_script_alloc_env(pool_name, path, upath,

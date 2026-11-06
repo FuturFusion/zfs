@@ -23,3 +23,8 @@ fix-pyzfs-version.patch
 BUILD_EXCLUSIVE_KERNEL_MIN.patch
 #bump-Linux-Minimum.patch
 #bump-Linux-Maximum.patch
+9999-cherry-pick-7.3-compat-1.patch
+9999-cherry-pick-7.3-compat-2.patch
+9999-cherry-pick-7.3-compat-3.patch
+9999-cherry-pick-7.3-compat-4.patch
+9999-cherry-pick-7.3-compat-5.patch

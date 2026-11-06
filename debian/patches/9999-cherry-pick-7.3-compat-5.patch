@@ -1,0 +1,25 @@
+From 908958f7f3b35d554301068c806bb608b5bd8281 Mon Sep 17 00:00:00 2001
+From: ooonea <35407790+ooonea@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 11:47:08 +0200
+Subject: [PATCH] Linux 7.3 compat: META
+
+The Linux 7.3 inode, bio iterator and initial filesystem context
+compatibility changes are present. Raise the maximum supported version.
+
+Signed-off-by: ooonea <35407790+ooonea@users.noreply.github.com>
+Assisted-by: OpenAI Codex
+---
+ META | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/META b/META
+index 800b6137a04e..f419ec35a22a 100644
+--- a/META
++++ b/META
+@@ -6,5 +6,5 @@ Release:       1
+ Release-Tags:  relext
+ License:       CDDL
+ Author:        OpenZFS
+-Linux-Maximum: 7.2
++Linux-Maximum: 7.3
+ Linux-Minimum: 4.18

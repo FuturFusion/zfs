@@ -1,0 +1,30 @@
+name: Release on tag
+
+# Thin entry point: a pushed debian/* tag triggers a full build + GitHub release.
+# All the actual work lives in _release.yml.
+#
+# workflow_dispatch is a manual fallback: re-run the build/release for a tag
+# that already exists (e.g. the automatic run failed, or a tag was pushed
+# with credentials that don't trigger workflows).
+on:
+  push:
+    tags:
+      - "debian/*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and release, e.g. debian/2.4.4-1"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Build and release
+    permissions:
+      contents: write
+    uses: ./.github/workflows/_release.yml
+    with:
+      tag: ${{ inputs.tag || github.ref_name }}

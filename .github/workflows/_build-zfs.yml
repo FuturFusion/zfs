@@ -1,0 +1,111 @@
+name: Build a ZFS release (reusable)
+
+# Not meant to be run directly -- called by release-on-tag.yml (triggered
+# by a release tag).
+on:
+  workflow_call:
+    inputs:
+      arch:
+        description: "Target architecture, e.g. amd64 or arm64."
+        required: true
+        type: string
+        default: amd64
+      package_version:
+        description: "Exact package version to build, e.g. 2.4.4-1."
+        required: true
+        type: string
+      zfs_version:
+        description: "Exact ZFS version to build, e.g. 2.4.4."
+        required: true
+        type: string
+    outputs:
+      artifact_name:
+        description: "Name of the uploaded build artifact."
+        value: ${{ jobs.build-kernel.outputs.artifact_name }}
+
+permissions:
+  contents: read
+
+jobs:
+  build-zfs:
+    name: Build ZFS
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - debian-13
+    runs-on:
+      - self-hosted
+      - futurfusion-kernel-build
+      - arch-${{ inputs.arch }}
+      - image-${{ matrix.os }}
+
+    outputs:
+      artifact_name: ${{ steps.artifact.outputs.name }}
+
+    env:
+      PACKAGE_VERSION: ${{ inputs.package_version }}
+      ZFS_VERSION: ${{ inputs.zfs_version }}
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            devscripts
+          sudo apt-get install --yes \
+            abigail-tools \
+            build-essential \
+            debhelper \
+            dh-python \
+            dh-sequence-dkms \
+            libaio-dev \
+            git \
+            libblkid-dev \
+            libcurl4-openssl-dev \
+            libelf-dev \
+            libpam0g-dev \
+            libssl-dev \
+            libtirpc-dev \
+            libtool \
+            libudev-dev \
+            lsb-release \
+            po-debconf \
+            python3-all-dev \
+            python3-cffi \
+            python3-setuptools \
+            python3-sphinx \
+            uuid-dev \
+            zlib1g-dev
+
+      - name: Build the packages
+        run: |
+          git archive -o ../zfs-linux_${ZFS_VERSION}.orig.tar.gz upstream/${ZFS_VERSION}
+
+          git checkout debian/${PACKAGE_VERSION}
+
+          debuild -us -uc
+
+          mkdir -p out/
+          cp ../*${ZFS_VERSION}* out/
+
+      - name: Determine artifact name
+        id: artifact
+        env:
+          ARCH: "${{ inputs.arch }}"
+        run: |
+          echo "name=zfs-${ARCH}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload resulting build
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        continue-on-error: true
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: out/*

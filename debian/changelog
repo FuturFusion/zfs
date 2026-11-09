@@ -1,9 +1,9 @@
-zfs-linux (2.4.4+git20261009.eb011f2-1) UNRELEASED; urgency=medium
+zfs-linux (2.4.4+git20261009.eb011f2-1) unstable; urgency=medium
 
   * New upstream snapshot from zfs-2.4.5-staging branch
     - Cherry-pick commits for Linux 7.3 compat
 
- -- Mathias Gibbens <mathias.gibbens@futurfusion.io>  Fri, 06 Nov 2026 18:41:29 +0000
+ -- Mathias Gibbens <mathias.gibbens@futurfusion.io>  Mon, 09 Nov 2026 15:42:19 -0700
 
 zfs-linux (2.4.4-1) unstable; urgency=high
 
